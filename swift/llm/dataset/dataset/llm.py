@@ -400,7 +400,7 @@ class CompetitionMathPreprocessor(ResponsePreprocessor):
 
     def preprocess(self, row: Dict[str, Any], all_tools=None) -> Optional[Dict[str, Any]]:
         query = row['problem']
-        response = row['response']
+        response = row['solution']
         row = {
             'query': query,
             'response': response,
@@ -422,6 +422,15 @@ register_dataset(
         tags=['qa', 'math']))
 
 register_dataset(DatasetMeta(ms_dataset_id='modelscope/gsm8k', subsets=['main'], split=['train'], tags=['qa', 'math']))
+
+register_dataset(
+    DatasetMeta(ms_dataset_id='modelscope/MathR', subsets=['default', 'clean'], split=['train'], tags=['qa', 'math']))
+register_dataset(
+    DatasetMeta(
+        ms_dataset_id='modelscope/MathR-32B-Distill',
+        subsets=['default', 'clean'],
+        split=['train'],
+        tags=['qa', 'math']))
 
 
 class HC3Preprocessor(ResponsePreprocessor):

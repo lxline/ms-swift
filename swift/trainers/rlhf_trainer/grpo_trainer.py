@@ -1,21 +1,21 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 # Part of the implementation is borrowed from huggingface/trl.
 import inspect
-from collections import defaultdict
+from collections import defaultdict, namedtuple
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Union
 from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 from accelerate.utils import broadcast_object_list, gather, gather_object
-from accelerate.utils.other import is_compiled_module
 from transformers import PreTrainedModel
 from trl import GRPOTrainer as HFGRPOTrainer
-from trl.models import unwrap_model_for_generation
 
 from swift.llm import InferRequest, RequestConfig, to_device
 from swift.plugin.orm import orms
-from swift.utils import get_logger, is_vllm_available, is_wandb_available
+from swift.utils import (get_device, get_device_count, get_dist_setting, get_logger, is_vllm_available,
+                         is_wandb_available)
 from ..mixin import SwiftMixin
 from .rlhf_mixin import RLHFTrainerMixin
 
@@ -46,7 +46,12 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if reward_funcs:
             for i, reward_func in enumerate(reward_funcs):
                 if reward_func in orms:
-                    reward_funcs[i] = orms[reward_func]()
+                    reward_func_class = orms[reward_func]
+                    reward_func_args = list(inspect.signature(reward_func_class.__init__).parameters)
+                    reward_func_args = [
+                        getattr(args, param) for param in reward_func_args if param not in ['self', 'args', 'kwargs']
+                    ]
+                    reward_funcs[i] = reward_func_class(*reward_func_args)
                 elif not callable(reward_func):
                     raise ValueError(f'reward_function {reward_func} is not implemented in swift.llm.plugin')
 
@@ -57,6 +62,15 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             self.reward_funcs.append(reward_model)
         if not self.reward_funcs:
             raise ValueError('You must specify reward_funcs or reward_model')
+
+        # Reward weights
+        if args.reward_weights is not None:
+            if len(args.reward_weights) != len(reward_funcs):
+                raise ValueError(f'Number of reward weights ({len(args.reward_weights)}) must match number of reward '
+                                 f'functions ({len(reward_funcs)})')
+            self.reward_weights = torch.tensor(args.reward_weights, dtype=torch.float32)
+        else:
+            self.reward_weights = torch.ones(len(reward_funcs), dtype=torch.float32)
 
         self.num_generations = args.num_generations
         model.warnings_issued['estimate_tokens'] = True
@@ -91,16 +105,20 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             if self.accelerator.is_main_process:
                 vllm_device = self.args.vllm_device
                 if vllm_device == 'auto':
-                    vllm_device = f'cuda:{self.accelerator.num_processes}'  # take the next GPU idx
+                    if torch.cuda.device_count() == 1:
+                        vllm_device = 'cuda:0'  # particular case when training with onyl 1 GPU: share it
+                    else:
+                        local_world_size = get_dist_setting()[3]
+                        vllm_device = f'cuda:{local_world_size}'  # take the next GPU idx
                 # Check that the requested device is available
-                if vllm_device.split(':')[0] == 'cuda' and int(vllm_device.split(':')[1]) >= torch.cuda.device_count():
+                if vllm_device.split(':')[0] == 'cuda' and int(vllm_device.split(':')[1]) >= get_device_count():
                     raise ValueError(
                         f'The requested device for vllm ({vllm_device}) is not available. You are likely using vLLM '
                         'without restricting the number of GPUs for training. Set the `--num_processes` argument to a '
                         'value lower than the number of GPUs available on your machine—typically, reducing it by one '
-                        f'is sufficient. In your case: `--num_processes {torch.cuda.device_count() - 1}`.')
+                        f'is sufficient. In your case: `--num_processes {get_device_count() - 1}`.')
                 # Check that the requested device is not also used for training
-                if vllm_device in {f'cuda:{idx}' for idx in range(self.accelerator.num_processes)}:
+                if vllm_device in {get_device(idx) for idx in range(self.accelerator.num_processes)}:
                     logger.warning(
                         f'The requested device {vllm_device} is also used for training. This may lead to unexpected '
                         'behavior. It is recommended to use a dedicated device for vLLM.')
@@ -111,10 +129,17 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 with world_size_patch, profiling_patch:
                     self.engine = VllmEngine(
                         model.model_dir,
+                        model.model_info.torch_dtype,
+                        model_type=model.model_meta.model_type,
                         device=vllm_device,
                         gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-                        enable_prefix_caching=True,
+                        enable_prefix_caching=args.vllm_enable_prefix_caching,
+                        max_num_seqs=args.vllm_max_num_seqs,
+                        enforce_eager=args.vllm_enforce_eager,
+                        limit_mm_per_prompt=args.vllm_limit_mm_per_prompt,
                         max_model_len=args.vllm_max_model_len)
+                    # compat _move_model_to_vllm
+                    self.llm = namedtuple('LLM', ['llm_engine'])(self.engine.engine.engine)
                 self.engine.default_template = self.template
             self._last_loaded_step = 0
             self.accelerator.wait_for_everyone()
@@ -124,6 +149,9 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         self.request_config = RequestConfig(
             max_tokens=args.max_completion_length,
             temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            repetition_penalty=args.repetition_penalty,
         )
 
         self.model_accepts_loss_kwargs = False
@@ -132,6 +160,21 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 self.reward_funcs[i] = self.accelerator.prepare_model(reward_func, evaluation_mode=True)
         self.log_completions = args.log_completions
 
+    @staticmethod
+    @contextmanager
+    def _template_context(template):
+        # The max_length for prompt and completion has already been restricted, so there is no need for max_length here.
+        max_length = template.max_length
+        mode = template.mode
+        if mode in {'vllm', 'pt', 'lmdeploy'}:
+            template.set_mode('train')
+        template.max_length = None
+        try:
+            yield
+        finally:
+            template.set_mode(mode)
+            template.max_length = max_length
+
     def _prepare_inputs(self, inputs) -> Dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
 
@@ -139,17 +182,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if self.args.use_vllm:
             # First, have main process load weights if needed
             if self.state.global_step != self._last_loaded_step:
-                with unwrap_model_for_generation(
-                        self.model, self.accelerator,
-                        gather_deepspeed3_params=self.args.ds3_gather_for_generation) as unwrapped_model:
-                    if is_compiled_module(unwrapped_model):
-                        state_dict = unwrapped_model._orig_mod.state_dict()
-                    else:
-                        state_dict = unwrapped_model.state_dict()
-                if self.accelerator.is_main_process:
-                    llm_model = self.engine.engine.engine.model_executor.driver_worker.model_runner.model
-                    # use_vllm only support 'full'
-                    llm_model.load_weights(state_dict.items())
+                self._move_model_to_vllm()
                 self._last_loaded_step = self.state.global_step
 
             # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
@@ -166,31 +199,31 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             # Regular generation path
             is_multimodal = self.model.model_meta.is_multimodal
             if is_multimodal:
-                self.template.remove_post_encode_hook()
+                models = self.template.remove_post_encode_hook()
             outputs = self.engine.infer(inputs, self.request_config, use_tqdm=False)
             if is_multimodal:
-                self.template.register_post_encode_hook([self.model])
+                self.template.register_post_encode_hook(models)
 
         # Slice to keep only the local part of the data
         process_slice = slice(
             self.accelerator.process_index * len(inputs),
             (self.accelerator.process_index + 1) * len(inputs),
         )
-        outputs = outputs[process_slice]
+        if self.args.use_vllm:
+            outputs = outputs[process_slice]
 
         for i, output in enumerate(outputs):
             messages = inputs[i]['messages']
             InferRequest.remove_response(messages)
             messages.append({'role': 'assistant', 'content': output.choices[0].message.content})
 
-        self.template.set_mode('train')
-        batched_inputs = [self.template.encode(infer_request) for infer_request in inputs]
-        outputs = to_device(self.template.data_collator(batched_inputs), self.model.device)
-        self.template.set_mode('pt')  # recover
+        with self._template_context(self.template):
+            batched_inputs = [self.template.encode(infer_request) for infer_request in inputs]
+            outputs = to_device(self.template.data_collator(batched_inputs), self.model.device)
 
         # we only need to compute the logits for the completion tokens
         labels = outputs.pop('labels')
-        logits_to_keep = labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1)).max().item()
+        logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
         outputs['logits_to_keep'] = logits_to_keep
         outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
 
@@ -206,8 +239,9 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         for i, (reward_func, reward_template) in enumerate(zip(self.reward_funcs, self.reward_templates)):
             if isinstance(reward_func, nn.Module):  # Module instead of PretrainedModel for compat with compiled models
-                batched_inputs = [reward_template.encode(infer_request) for infer_request in inputs]
-                reward_inputs = to_device(reward_template.data_collator(batched_inputs), reward_func.device)
+                with self._template_context(reward_template):
+                    batched_inputs = [reward_template.encode(infer_request) for infer_request in inputs]
+                    reward_inputs = to_device(reward_template.data_collator(batched_inputs), reward_func.device)
 
                 with torch.inference_mode():
                     rewards_per_func[:, i] = reward_func(**reward_inputs).logits[:, 0]
@@ -218,8 +252,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
         rewards_per_func = gather(rewards_per_func)
-        # Sum the rewards from all reward functions
-        rewards = rewards_per_func.sum(dim=1)
+        # Apply weights to each reward function's output and sum
+        rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).sum(dim=1)
 
         # Compute grouped-wise rewards
         mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
@@ -256,7 +290,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             # For logging
             table = {
                 'step': [str(self.state.global_step)] * len(rewards),
-                'messages': gather_object(inputs['messages'][:-1]),
+                'messages': [inputs['messages'][:-1] for inputs in gather_object(inputs)],
                 'completion': gather_object(completions),
                 'reward': rewards.tolist(),
             }
