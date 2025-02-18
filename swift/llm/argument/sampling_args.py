@@ -84,3 +84,6 @@ class SamplingArguments(BaseArguments):
             }]
         else:
             self.system_message = []
+
+        if self.sampler_type == 'mcts':
+            self.stop_words = ['\n\n']
