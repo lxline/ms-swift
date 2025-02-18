@@ -9,7 +9,7 @@ from modelscope.msdatasets import MsDataset
 conda_prefix = ''
 
 
-def client_sample(model: str, orm: str, dataset_path: str, iter: int, device_count: int, output_dir: str):
+def client_sample(model: str, orm: str, prm: str, dataset_path: str, iter: int, device_count: int, output_dir: str):
     handlers = []
     # Sampling cache
     api_key = os.getenv('DASHSCOPE_API_KEY')
@@ -27,17 +27,18 @@ def client_sample(model: str, orm: str, dataset_path: str, iter: int, device_cou
         if not os.path.exists(cache_file_path):
             open(cache_file_path, 'w').close()
         sample_cmd = (f'USE_OPENCOMPASS_EVALUATOR=True '
+                      f'DASHSCOPE_API_KEY={api_key} '
                       f'swift sample '
                       f'--model {model} '
                       f'--orm_model {orm} '
+                      f'--prm_model {prm} '
                       f'--sampler_type mcts '
                       f'--process_reward_rate 0 '
-                      f'--stop_words ки '
+                      f'--stop_words \\n\\n '
                       f'--seed 42 '
                       f'--api_key {api_key} '
                       f'--dataset {single_dataset_path} '
                       f'--max_length 2048 '
-                      f'--system ./scripts/sampler/system_prompt.txt '
                       f'--load_args false '
                       f'--sampler_engine client '
                       f'--max_new_tokens 768 '
@@ -96,6 +97,7 @@ def split_dataset(ds, split_size, out_path):
 def main():
     server_model = 'qwen-max'
     orm = 'math'
+    prm = 'client'
     device_count = 20
     output_dir = 'output/sampler/client_mcts/'
     dataset_dir = 'datasets/competition_math/'
@@ -108,7 +110,7 @@ def main():
     split_dataset(ds, device_count, dataset_dir)
 
     ts = time.time()
-    client_sample(server_model, orm, dataset_dir, 0, device_count, output_dir)
+    client_sample(server_model, orm, prm, dataset_dir, 0, device_count, output_dir)
     print(f'do sample cost: {(time.time() - ts) / 60:.1f} minutes.', flush=True)
 
 

@@ -14,13 +14,10 @@ from .utils import get_reward, perform_infer
 
 logger = get_logger()
 
-NXT_PROMPT = """Continue.
-"""
-
-next_message = {
+next_message = [{
     'role': 'user',
-    'content': NXT_PROMPT,
-}
+    'content': 'Continue.',
+}]
 
 
 class LanguageNode:
@@ -74,7 +71,7 @@ class LanguageNode:
 
     def collect(self):
         result = {
-            'path': self.path,
+            'step': self.path[-1] if len(self.path) > 0 else '',
             'depth': self.depth,
             'visit_count': self.visit_count,
             'process_reward': self.process_reward,
@@ -177,13 +174,13 @@ class MctsSampler(Sampler):
         def _expand(expand_curr_node: LanguageNode):
             n = _args.num_return_sequences - len(expand_curr_node.children)
             if expand_curr_node.is_root():
-                infer_requests = [InferRequest(system_message + [prompt_message]) for _ in range(n)]
+                infer_requests = [InferRequest(system_message + prompt_message) for _ in range(n)]
             else:
-                history_message = {
+                history_messages = [{
                     'role': 'assistant',
-                    'content': expand_curr_node.answer,
-                }
-                infer_request = InferRequest(system_message + [prompt_message, history_message, next_message])
+                    'content': step,
+                } for step in expand_curr_node.path]
+                infer_request = InferRequest(system_message + prompt_message + history_messages + next_message)
                 infer_requests = [infer_request for _ in range(n)]
 
             # e_time = time.time()
@@ -233,8 +230,8 @@ class MctsSampler(Sampler):
             if self.prm_model:
                 prm_infer_requests = []
                 for child in expand_curr_node.children:
-                    prm_message = {'role': 'assistant', 'content': child.answer}
-                    prm_infer_requests.append(InferRequest([prompt_message, prm_message]))
+                    prm_messages = [{'role': 'assistant', 'content': step} for step in child.path]
+                    prm_infer_requests.append(InferRequest(prompt_message + prm_messages))
                 prm_score, _prm_mask = get_reward(
                     self.prm_model,
                     prm_infer_requests,
@@ -249,19 +246,19 @@ class MctsSampler(Sampler):
             rollout_nodes = {}
             for i in range(len(rollout_curr_node.active_children)):
                 rollout_nodes[i] = {
-                    'node': rollout_curr_node.active_children[i],
-                    'history_messages': {
+                    'node':
+                    rollout_curr_node.active_children[i],
+                    'history_messages': [{
                         'role': 'assistant',
-                        'content': rollout_curr_node.active_children[i].answer,
-                    },
+                        'content': step,
+                    } for step in rollout_curr_node.active_children[i].path],
                 }
             active_rollout_nodes = list(rollout_nodes.keys())
             while len(active_rollout_nodes) > 0 and rollout_depth < _args.rollout_depth:
                 # r_time = time.time()
                 infer_requests = [
-                    InferRequest(system_message
-                                 + [prompt_message, rollout_nodes[index]['history_messages'], next_message])
-                    for index in active_rollout_nodes
+                    InferRequest(system_message + prompt_message + rollout_nodes[index]['history_messages']
+                                 + next_message) for index in active_rollout_nodes
                 ]
                 # logger.info(f"rollout.prepare time: {time.time() - r_time}")
                 # r_time = time.time()
@@ -272,7 +269,7 @@ class MctsSampler(Sampler):
                     if len(responses) > 0:
                         break
                     if rollout_iter_index == 5:
-                        raise ValueError('Rollout should not return any response')
+                        raise ValueError('Rollout did not return any response')
                     rollout_iter_index += 1
                 # logger.info(f"rollout.infer time: {time.time() - r_time}")
 
@@ -281,11 +278,14 @@ class MctsSampler(Sampler):
                 end_paths = []
                 for index, response in zip(active_rollout_nodes, responses):
                     self.update_usage_info(response)
-                    output = response.choices[0].message.content.rstrip(sep_token
-                                                                        + '\n').split(sep_token)[0] + sep_token + '\n'
-                    rollout_nodes[index]['history_messages']['content'] += output
-                    end_paths.append(rollout_nodes[index]['history_messages']['content'])
-                    orm_infer_requests.append(InferRequest([rollout_nodes[index]['history_messages']]))
+                    output = response.choices[0].message.content.rstrip(sep_token + '\n').split(sep_token)[0]
+                    output_message = {
+                        'role': 'assistant',
+                        'content': output,
+                    }
+                    rollout_nodes[index]['history_messages'].append(output_message)
+                    end_paths.append(output)
+                    orm_infer_requests.append(InferRequest(rollout_nodes[index]['history_messages']))
                 # logger.info(f"rollout.orm_prepare time: {time.time() - r_time}")
 
                 # r_time = time.time()
@@ -299,10 +299,11 @@ class MctsSampler(Sampler):
                 for index, score, terminated in zip(active_rollout_nodes, orm_score, terminated_state):
                     if terminated:
                         rollout_curr_node.active_children[index].init_and_update_value(score)
+                        answer = sep_token.join([step['content'] for step in rollout_nodes[index]['history_messages']])
                         if score > 0.9:
-                            rollout_correct_answers.append(rollout_nodes[index]['history_messages']['content'])
+                            rollout_correct_answers.append(answer)
                         else:
-                            rollout_incorrect_answers.append(rollout_nodes[index]['history_messages']['content'])
+                            rollout_incorrect_answers.append(answer)
                         rollout_nodes.pop(index)
                 active_rollout_nodes = list(rollout_nodes.keys())
                 rollout_depth += 1
@@ -325,12 +326,12 @@ class MctsSampler(Sampler):
 
         _args = self.args
         system_message = [] + _args.system_message
-        sep_token = _args.stop_words[0] + '\n'
+        sep_token = _args.stop_words[0]
         _root = LanguageNode(sep_token=sep_token)
-        prompt_message = {
+        prompt_message = [{
             'role': 'user',
             'content': query,
-        }
+        }]
 
         rollout_correct_answers, rollout_incorrect_answers, terminated_nodes = [], [], []
         iter_count = 0
