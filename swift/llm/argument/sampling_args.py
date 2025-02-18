@@ -85,5 +85,6 @@ class SamplingArguments(BaseArguments):
         else:
             self.system_message = []
 
+        # TODO: better way to handle this
         if self.sampler_type == 'mcts':
             self.stop_words = ['\n\n']
