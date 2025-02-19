@@ -43,14 +43,20 @@ class SamplingArguments(BaseArguments):
     # Vanilla
     cache_files: List[str] = dataclasses.field(default_factory=list)
 
-    # MCTS
+    # MCTS & DVTS
     rollout_depth: int = 5
-    rollout_start_depth: int = 3
     max_iterations: int = 100
     process_reward_rate: float = 0.0
+
+    # MCTS
+    rollout_start_depth: int = 3
     exploration_rate: float = 0.5
     api_key: str = 'EMPTY'
     base_url: str = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+
+    # DVTS
+    num_trees: int = 4
+    beam_width: int = 4
 
     def _init_model_info(self):
         if self.sampler_engine != 'client':

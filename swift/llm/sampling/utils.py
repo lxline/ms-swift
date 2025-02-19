@@ -23,7 +23,8 @@ def get_reward(model: Any,
                infer_requests: List[InferRequest],
                request_config: RequestConfig = None,
                ground_truths: List[str] = None,
-               threshold: Optional[float] = None):
+               threshold: Optional[float] = None,
+               normalize: bool = True,):
     """Get reward from an RM model.
 
     Args:
@@ -32,10 +33,11 @@ def get_reward(model: Any,
         request_config: Infer config
         ground_truths: The ground truth list
         threshold: An optional threshold to generate the mask
+        normalize: Whether to normalize the scores
 
     Returns:
         Tuple
-        Index 0: The min-max normalized scores matched the infer_requests
+        Index 0: The scores matched the infer_requests
         Index 1: The mask filtered by the threshold
     """
     parameters = inspect.signature(model.__call__).parameters
@@ -67,7 +69,9 @@ def get_reward(model: Any,
         normalized = (arr - min_val) / (max_val - min_val + 1e-5)
         return normalized
 
-    return normalize(arr), _mask
+    if normalize:
+        return normalize(arr), _mask
+    return arr, _mask
 
 
 def perform_infer(infer_engines, infer_requests, request_configs, **infer_kwargs):

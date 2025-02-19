@@ -189,7 +189,6 @@ class ClientPRM(PRM):
 
     def __call__(self,
                  infer_requests: List[Union[InferRequest, Dict]],
-                 ground_truths: List[str] = None,
                  **kwargs) -> List[float]:
         prm_infer_requests = []
         request_config = kwargs.get('request_config')
@@ -257,7 +256,6 @@ class QwenPRM(PRM):
 
     def __call__(self,
                  infer_requests: List[Union[InferRequest, Dict]],
-                 ground_truths: List[str] = None,
                  **kwargs) -> List[float]:
         prm_infer_requests = []
         system = 'Please reason step by step, and put your final answer within \\boxed{}.'
