@@ -218,7 +218,7 @@ class DvtsSampler(Sampler):
         if _args.sampler_engine == 'multi_clients':
             from swift.llm import InferClient
             self.infer_engine = [
-                InferClient(**_args.engine_kwargs) for _ in range(_args.num_beams * _args.beam_width)
+                InferClient(**_args.engine_kwargs) for _ in range(_args.num_trees * _args.beam_width)
             ]
             self.infer_kwargs['model'] = _args.model
         elif _args.sampler_engine == 'client':
