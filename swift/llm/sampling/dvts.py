@@ -46,7 +46,7 @@ def aggregate_scores(
         raise ValueError(f"Invalid aggregation strategy: {agg_strategy}")
 
 
-class LanguageTree:
+class BeamSearchTree:
     def __init__(self,
                  query,
                  ground_truth,
@@ -58,11 +58,6 @@ class LanguageTree:
                  prm_model,):
         self.query = query
         self.ground_truth = ground_truth
-        self.query_message = [{
-            'role': 'user',
-            'content': query,
-        }]
-        # self.prefix_messages = config.system_message + self.query_message
         self.prefix_messages = prefix_messages
         self.suffix_messages = [{
             'role': 'user',
@@ -91,6 +86,7 @@ class LanguageTree:
             for beam in gen_beams:
                 next_beams += self.expand(beam)
             self.beams = self.rollout(next_beams)
+        return self.answers
 
     def expand(self, curr_beam):
         _config = self.config
@@ -124,7 +120,7 @@ class LanguageTree:
         unique_output = set()
         prm_infer_requests = []
         for response in responses:
-            self.update_usage_info(response)
+            # self.update_usage_info(response)
             output = response.choices[0].message.content.rstrip(_config.sep_token + '\n').split(_config.sep_token)[0]
             if output in unique_output:
                 continue
@@ -217,35 +213,32 @@ class DvtsSampler(Sampler):
         super().__init__(input_args)
 
     def _prepare_model_tokenizer(self):
-        args = self.args
+        _args = self.args
         self.infer_kwargs = {}
-        if args.sampler_engine == 'client':
+        if _args.sampler_engine == 'multi_clients':
             from swift.llm import InferClient
-            api_key = args.api_key
-            base_url = args.base_url
             self.infer_engine = [
-                InferClient(base_url=base_url, api_key=api_key) for _ in range(args.num_return_sequences)
+                InferClient(**_args.engine_kwargs) for _ in range(_args.num_beams * _args.beam_width)
             ]
-            self.infer_kwargs['model'] = args.model
-        else:
-            _Engine = self.get_infer_engine()
-            self.infer_engine = _Engine(self.args.model, model_type=self.args.model_type, **self.args.engine_kwargs)
-
-    def get_infer_engine(self):
-        if self.args.sampler_engine == 'pt':
+            self.infer_kwargs['model'] = _args.model
+        elif _args.sampler_engine == 'client':
+            from swift.llm import InferClient
+            self.infer_engine = InferClient(**_args.engine_kwargs)
+            self.infer_kwargs['model'] = _args.model
+        elif _args.sampler_engine == 'pt':
             from swift.llm import PtEngine
-            _Engine = PtEngine
-        elif self.args.sampler_engine == 'vllm':
+            self.infer_engine = PtEngine(_args.model, model_type=_args.model_type, **_args.engine_kwargs)
+        elif _args.sampler_engine == 'vllm':
             from swift.llm import VllmEngine
-            _Engine = VllmEngine
-        elif self.args.sampler_engine == 'lmdeploy':
+            self.infer_engine = VllmEngine(_args.model, model_type=_args.model_type, **_args.engine_kwargs)
+        elif _args.sampler_engine == 'lmdeploy':
             from swift.llm import LmdeployEngine
-            _Engine = LmdeployEngine
-        elif self.args.sampler_engine == 'no':
+            self.infer_engine = LmdeployEngine(_args.model, model_type=_args.model_type, **_args.engine_kwargs)
+        elif _args.sampler_engine == 'no':
             _Engine = None
+            raise ValueError(f'sampler_engine was set to {_args.sampler_engine}, so no engine is used.')
         else:
-            raise ValueError(f'Cannot find engine name: {self.args.sampler_engine}')
-        return _Engine
+            raise ValueError(f'Cannot find engine name: {_args.sampler_engine}')
 
     def _prepare_template(self) -> None:
         # Hack from super()
@@ -258,7 +251,7 @@ class DvtsSampler(Sampler):
         request_config.seed = _args.seed
         self.expand_request_configs = []
         self.rollout_request_configs = []
-        for i in range(_args.num_return_sequences):
+        for i in range(max(_args.num_trees, _args.num_beams * _args.beam_width)):
             expand_request_config = deepcopy(request_config)
             expand_request_config.n = 1
             expand_request_config.num_beams = expand_request_config.n
@@ -270,6 +263,65 @@ class DvtsSampler(Sampler):
             rollout_request_config.n = 1
             self.rollout_request_configs.append(rollout_request_config)
 
+    def create_trees(self, query: str, ground_truth: str):
+        _args = self.args
+
+        query_message = [{
+            'role': 'user',
+            'content': query,
+        }]
+        prefix_messages = _args.system_message + query_message
+        infer_requests = [InferRequest(prefix_messages) for _ in range(_args.num_trees)]
+
+        # e_time = time.time()
+        expand_iter_index = 0
+        unique_output = set()
+        prm_infer_requests = []
+        while True:
+            responses = perform_infer(self.infer_engine, infer_requests, self.expand_request_configs,
+                                      **self.infer_kwargs)
+            for response in responses:
+                output = \
+                response.choices[0].message.content.rstrip("".join(_args.stop_words)).split(_args.stop_words[0])[0]
+                if output in unique_output:
+                    continue
+                unique_output.add(output)
+                infer_request = InferRequest(prefix_messages + [{'role': 'assistant', 'content': output}])
+                prm_infer_requests.append(infer_request)
+            if len(unique_output) > _args.num_trees:
+                break
+            if expand_iter_index == 5:
+                raise ValueError(f'5 iterations did get enough responses for {_args.num_trees} trees')
+            expand_iter_index += 1
+
+        prm_score, _prm_mask = get_reward(
+            self.prm_model,
+            prm_infer_requests,
+            threshold=_args.prm_threshold,
+            normalize=False,
+        )
+        # logger.info(f"expand.prm time: {time.time() - e_time}")
+
+        answers = []
+        for output, score in zip(unique_output, prm_score):
+            beam = Beam(
+                current_texts = [output],
+                current_scores = [score],
+            )
+            tree = BeamSearchTree(
+                query,
+                ground_truth,
+                prefix_messages,
+                beam,
+                _args,
+                self.infer_engine,
+                self.orm_model,
+                self.prm_model,
+            )
+            tree_answers = tree.build()
+            answers.append(tree_answers)
+        return answers
+
     def do_sample(self, data):
         if not isinstance(data, list):
             data = [data]
@@ -280,7 +332,8 @@ class DvtsSampler(Sampler):
                 messages = item['messages'][0]
                 query = messages[0]['content']
                 ground_truth = messages[1]['content']
-                generated.append(self.search_single(query, ground_truth) + '\n')
+                answers = self.create_trees(query, ground_truth)
+                generated.append(answers)
             except Exception as e:
                 logger.error(f'Error: {e}')
                 logger.error(f'Traceback: {traceback.format_exc()}')

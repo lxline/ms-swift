@@ -21,8 +21,8 @@ class SamplingArguments(BaseArguments):
 
     # sampler settings
     # sample/mcts/dvts/xxx
-    sampler_type: Literal['sample', 'mcts'] = 'sample'
-    sampler_engine: Literal['pt', 'lmdeploy', 'vllm', 'no', 'client'] = 'pt'
+    sampler_type: Literal['sample', 'mcts', 'dvts'] = 'sample'
+    sampler_engine: Literal['pt', 'lmdeploy', 'vllm', 'no', 'client', 'multi_clients'] = 'pt'
     output_dir: str = 'sample_output'
     output_file: Optional[str] = None
     override_exist_file: bool = False
@@ -76,7 +76,7 @@ class SamplingArguments(BaseArguments):
                                  f'`--output_file` but now is: {self.output_file}')
         self.padding_side = 'left'
         if self.engine_kwargs is not None:
-            print(self.engine_kwargs)
+            logger.info(self.engine_kwargs)
             self.engine_kwargs = json.loads(self.engine_kwargs)
         else:
             self.engine_kwargs = {}
@@ -91,5 +91,5 @@ class SamplingArguments(BaseArguments):
         else:
             self.system_message = []
 
-        if self.sampler_type == 'mcts':
-            self.stop_words = ['\n\n']
+        if self.sampler_type in ['mcts', 'dvts']:
+            self.stop_words = ['\n\n'] + self.stop_words
