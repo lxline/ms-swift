@@ -24,7 +24,7 @@ def get_reward(model: Any,
                request_config: RequestConfig = None,
                ground_truths: List[str] = None,
                threshold: Optional[float] = None,
-               normalize: bool = True,):
+               do_normalize: bool = True,):
     """Get reward from an RM model.
 
     Args:
@@ -69,7 +69,7 @@ def get_reward(model: Any,
         normalized = (arr - min_val) / (max_val - min_val + 1e-5)
         return normalized
 
-    if normalize:
+    if do_normalize:
         return normalize(arr), _mask
     return arr, _mask
 

@@ -31,6 +31,7 @@ class Beam:
     rollout_scores: List[float] = None,
     outcome_score: float = 0.0,
     terminated: bool = False
+    children: List['Beam'] = None
 
 
 def aggregate_scores(
@@ -81,14 +82,16 @@ class BeamSearchTree:
 
     def build(self):
         while len(self.answers) < self.config.num_return_sequences:
-            gen_beams = [beam for beam in self.beams if not beam.terminated]
+            _beams = [beam for beam in self.beams if not beam.terminated]
             next_beams = []
-            for beam in gen_beams:
-                next_beams += self.expand(beam)
-            self.beams = self.rollout(next_beams)
+            for beam in _beams:
+                gen_beams = self.expand(beam)
+                self.rollout(gen_beams)
+                next_beams.append(self.prune(gen_beams))
+            self.beams = next_beams
         return self.answers
 
-    def expand(self, curr_beam):
+    def expand(self, curr_beam: Beam):
         _config = self.config
         n = _config.num_return_sequences - len(self.answers)
         history_messages = []
@@ -121,7 +124,7 @@ class BeamSearchTree:
         prm_infer_requests = []
         for response in responses:
             # self.update_usage_info(response)
-            output = response.choices[0].message.content.rstrip(_config.sep_token + '\n').split(_config.sep_token)[0]
+            output = response.choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
             if output in unique_output:
                 continue
             unique_output.add(output)
@@ -134,7 +137,7 @@ class BeamSearchTree:
             self.prm_model,
             prm_infer_requests,
             threshold=_config.prm_threshold,
-            normalize=False,
+            do_normalize=False,
         )
         # logger.info(f"expand.prm time: {time.time() - e_time}")
 
@@ -147,7 +150,7 @@ class BeamSearchTree:
             new_beams.append(new_beam)
         return new_beams
 
-    def rollout(self, next_beams):
+    def rollout(self, next_beams: List[Beam]):
         _config = self.config
         index2rollout_beams = {}
         active_index = []
@@ -178,7 +181,7 @@ class BeamSearchTree:
 
             prm_infer_requests = []
             for index, response in zip(active_index, responses):
-                output = response.choices[0].message.content.rstrip(_config.sep_token + '\n').split(_config.sep_token)[0]
+                output = response.choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
                 beam = index2rollout_beams[index]
                 beam.rollout_texts.append(output)
                 history_messages = [{
@@ -195,7 +198,7 @@ class BeamSearchTree:
                 self.prm_model,
                 prm_infer_requests,
                 threshold=_config.prm_threshold,
-                normalize=False,
+                do_normalize=False,
             )
 
             nxt_index = []
@@ -205,6 +208,15 @@ class BeamSearchTree:
                 if not self.orm_model.check_terminate(beam.rollout_texts[-1])[0]:
                     nxt_index.append(index)
             active_index = nxt_index
+
+    def prune(self, gen_beams):
+        score2beam = {}
+        for beam in gen_beams:
+            mean_score = np.mean([beam.current_scores[-1]] + beam.rollout_scores)
+            score2beam[mean_score] = beam
+        best_score = max(score2beam.keys())
+        best_beam = score2beam[best_score]
+        return best_beam
 
 
 class DvtsSampler(Sampler):
@@ -251,7 +263,7 @@ class DvtsSampler(Sampler):
         request_config.seed = _args.seed
         self.expand_request_configs = []
         self.rollout_request_configs = []
-        for i in range(max(_args.num_trees, _args.num_beams * _args.beam_width)):
+        for i in range(max(_args.num_trees, _args.num_trees * _args.beam_width)):
             expand_request_config = deepcopy(request_config)
             expand_request_config.n = 1
             expand_request_config.num_beams = expand_request_config.n
@@ -265,6 +277,9 @@ class DvtsSampler(Sampler):
 
     def create_trees(self, query: str, ground_truth: str):
         _args = self.args
+        _args.expand_request_configs = self.expand_request_configs
+        _args.rollout_request_configs = self.rollout_request_configs
+        _args.infer_kwargs = self.infer_kwargs
 
         query_message = [{
             'role': 'user',
@@ -298,7 +313,7 @@ class DvtsSampler(Sampler):
             self.prm_model,
             prm_infer_requests,
             threshold=_args.prm_threshold,
-            normalize=False,
+            do_normalize=False,
         )
         # logger.info(f"expand.prm time: {time.time() - e_time}")
 
