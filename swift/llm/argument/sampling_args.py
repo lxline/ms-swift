@@ -59,7 +59,7 @@ class SamplingArguments(BaseArguments):
     beam_width: int = 4
 
     def _init_model_info(self):
-        if self.sampler_engine != 'client':
+        if self.sampler_engine != 'client' and self.sampler_engine != 'multi_clients':
             return super()._init_model_info()
         self.task_type = 'causal_lm'
         return
