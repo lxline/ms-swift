@@ -30,6 +30,9 @@ class SwiftSampling(SwiftPipeline):
         elif self.args.sampler_type == 'mcts':
             from swift.llm.sampling.mcts import MctsSampler
             self.sampler = MctsSampler(self.args)
+        elif self.args.sampler_type == 'dvts':
+            from swift.llm.sampling.dvts import DvtsSampler
+            self.sampler = DvtsSampler(self.args)
 
     def _get_dataset(self):
         args = self.args

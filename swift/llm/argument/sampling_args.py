@@ -46,9 +46,9 @@ class SamplingArguments(BaseArguments):
     # MCTS & DVTS
     rollout_depth: int = 5
     max_iterations: int = 100
-    process_reward_rate: float = 0.0
 
     # MCTS
+    process_reward_rate: float = 0.0
     rollout_start_depth: int = 3
     exploration_rate: float = 0.5
     api_key: str = 'EMPTY'
