@@ -1,10 +1,11 @@
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from copy import deepcopy
 
 import json
+import warnings
 import numpy as np
 
 import math
@@ -25,13 +26,13 @@ NXT_PROMPT = "Continue."
 
 @dataclass
 class Beam:
-    current_texts: List[str] = None,
-    rollout_texts: List[str] = None,
-    current_scores: List[float] = None,
-    rollout_scores: List[float] = None,
-    outcome_score: float = 0.0,
+    current_texts: List[str] = field(default_factory=list)
+    rollout_texts: List[str] = field(default_factory=list)
+    current_scores: List[float] = field(default_factory=list)
+    rollout_scores: List[float] = field(default_factory=list)
+    outcome_score: float = 0.0
     terminated: bool = False
-    children: List['Beam'] = None
+    # children: List['Beam'] = None
 
 
 def aggregate_scores(
@@ -81,58 +82,63 @@ class BeamSearchTree:
             setattr(self.usage_info, key, update_value)
 
     def build(self):
-        while len(self.answers) < self.config.num_return_sequences:
+        iter_index = 0
+        while (iter_index < self.config.max_iterations
+            and len(self.answers) < self.config.num_return_sequences):
             _beams = [beam for beam in self.beams if not beam.terminated]
             next_beams = []
             for beam in _beams:
                 gen_beams = self.expand(beam)
-                self.rollout(gen_beams)
-                next_beams.append(self.prune(gen_beams))
+                if iter_index == 0:
+                    next_beams = gen_beams
+                else:
+                    self.rollout(gen_beams)
+                    next_beams.append(self.prune(gen_beams))
+            iter_index += 1
             self.beams = next_beams
         return self.answers
 
     def expand(self, curr_beam: Beam):
         _config = self.config
-        n = _config.num_return_sequences - len(self.answers)
-        history_messages = []
-        suffix_messages = []
-        if self.step_index > 0:
-            history_messages = [{
-                'role': 'assistant',
-                'content': step,
-            } for step in curr_beam.current_texts]
-            suffix_messages = self.suffix_messages
+        n = _config.beam_width
+        history_messages = [{
+            'role': 'assistant',
+            'content': _config.stop_words[0].join(curr_beam.current_texts),
+        }]
+        suffix_messages = self.suffix_messages
         infer_requests = [InferRequest(self.prefix_messages + history_messages + suffix_messages) for _ in range(n)]
 
         # e_time = time.time()
         # To perform the Expand operation in parallel,
         # there's no need to consider the order for now, since the Prompt is the same.
+        history_messages = [{
+            'role': 'assistant',
+            'content': step,
+        } for step in curr_beam.current_texts]
         expand_iter_index = 0
-        while True:
+        unique_output = set()
+        prm_infer_requests = []
+        while len(unique_output) < n:
             responses = perform_infer(self.generator, infer_requests, _config.expand_request_configs,
                                       **_config.infer_kwargs)
-            if len(responses) > 0:
-                break
+            for response in responses:
+                # self.update_usage_info(response)
+                output = \
+                response.choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
+                if output in unique_output:
+                    continue
+                unique_output.add(output)
+                infer_request = InferRequest(self.prefix_messages + history_messages
+                                             + [{'role': 'assistant', 'content': output}])
+                prm_infer_requests.append(infer_request)
             if expand_iter_index == 5:
-                raise ValueError('Expand did not return any response')
+                warnings.warn(f'5 iterations did get enough responses for beam_width: {_config.beam_width}')
+                break
             expand_iter_index += 1
         # logger.info(f"expand.expand time: {time.time() - e_time}")
 
         # To fetch Process Reward in parallel
         # e_time = time.time()
-        unique_output = set()
-        prm_infer_requests = []
-        for response in responses:
-            # self.update_usage_info(response)
-            output = response.choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
-            if output in unique_output:
-                continue
-            unique_output.add(output)
-            infer_request = InferRequest(self.prefix_messages + history_messages
-                                         + [{'role': 'assistant', 'content': output}]
-                                         + suffix_messages)
-            prm_infer_requests.append(infer_request)
-
         prm_score, _prm_mask = get_reward(
             self.prm_model,
             prm_infer_requests,
@@ -168,15 +174,12 @@ class BeamSearchTree:
                 beam = index2rollout_beams[index]
                 history_messages = [{
                     'role': 'assistant',
-                    'content': step,
-                } for step in beam.current_texts] + [{
-                    'role': 'user',
-                    'content': step,
-                } for step in beam.rollout_texts]
+                    'content': _config.stop_words[0].join(beam.current_texts + beam.rollout_texts),
+                }]
                 infer_request = InferRequest(self.prefix_messages + history_messages + self.suffix_messages)
                 infer_requests.append(infer_request)
 
-            responses = perform_infer(self.generator, infer_requests, _config.expand_request_configs,
+            responses = perform_infer(self.generator, infer_requests, _config.rollout_request_configs,
                                       **_config.infer_kwargs)
 
             prm_infer_requests = []
@@ -188,7 +191,7 @@ class BeamSearchTree:
                     'role': 'assistant',
                     'content': step,
                 } for step in beam.current_texts] + [{
-                    'role': 'user',
+                    'role': 'assistant',
                     'content': step,
                 } for step in beam.rollout_texts]
                 infer_request = InferRequest(self.prefix_messages + history_messages)
@@ -205,7 +208,7 @@ class BeamSearchTree:
             for index, score in zip(active_index, prm_score):
                 beam = index2rollout_beams[index]
                 beam.rollout_scores.append(score)
-                if not self.orm_model.check_terminate(beam.rollout_texts[-1])[0]:
+                if score > 0 and not self.orm_model.check_terminate(beam.rollout_texts[-1])[0]:
                     nxt_index.append(index)
             active_index = nxt_index
 
