@@ -84,15 +84,15 @@ class BeamSearchTree:
     def build(self):
         iter_index = 0
         while (iter_index < self.config.max_iterations
-            and len(self.answers) < self.config.num_return_sequences):
+            and len(self.beams) > 0):
             _beams = [beam for beam in self.beams if not beam.terminated]
             next_beams = []
             for beam in _beams:
                 gen_beams = self.expand(beam)
+                self.rollout(gen_beams)
                 if iter_index == 0:
                     next_beams = gen_beams
                 else:
-                    self.rollout(gen_beams)
                     next_beams.append(self.prune(gen_beams))
             iter_index += 1
             self.beams = next_beams
@@ -118,6 +118,19 @@ class BeamSearchTree:
         expand_iter_index = 0
         unique_output = set()
         prm_infer_requests = []
+        responses = perform_infer(self.generator, infer_requests, _config.expand_request_configs,
+                                  **_config.infer_kwargs)
+        for response in responses:
+            # self.update_usage_info(response)
+            output = \
+                response.choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
+            if output in unique_output:
+                continue
+            unique_output.add(output)
+            infer_request = InferRequest(self.prefix_messages + history_messages
+                                         + [{'role': 'assistant', 'content': output}])
+            prm_infer_requests.append(infer_request)
+        """
         while len(unique_output) < n:
             responses = perform_infer(self.generator, infer_requests, _config.expand_request_configs,
                                       **_config.infer_kwargs)
@@ -136,6 +149,7 @@ class BeamSearchTree:
                 break
             expand_iter_index += 1
         # logger.info(f"expand.expand time: {time.time() - e_time}")
+        """
 
         # To fetch Process Reward in parallel
         # e_time = time.time()
@@ -163,6 +177,7 @@ class BeamSearchTree:
         for index, beam in enumerate(next_beams):
             if self.orm_model.check_terminate(beam.current_texts[-1])[0]:
                 beam.terminated = True
+                self.answers.append(_config.stop_words[0].join(beam.current_texts))
             else:
                 index2rollout_beams[index] = beam
                 active_index.append(index)
