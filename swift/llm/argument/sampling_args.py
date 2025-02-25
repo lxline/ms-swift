@@ -55,8 +55,8 @@ class SamplingArguments(BaseArguments):
     base_url: str = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 
     # DVTS
-    num_trees: int = 4
-    beam_width: int = 4
+    dvts_beam_size: int = 4
+    dvts_beam_width: int = 4
 
     def _init_model_info(self):
         if self.sampler_engine != 'client' and self.sampler_engine != 'multi_clients':

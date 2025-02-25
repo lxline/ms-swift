@@ -33,7 +33,7 @@ def get_reward(model: Any,
         request_config: Infer config
         ground_truths: The ground truth list
         threshold: An optional threshold to generate the mask
-        normalize: Whether to normalize the scores
+        do_normalize: Whether to normalize the scores
 
     Returns:
         Tuple
@@ -85,11 +85,11 @@ def perform_infer(infer_engines, infer_requests, request_configs, **infer_kwargs
                 i
                 for i in range(n)
             }
-            responses = []
+            responses = [None] * n
             for future in as_completed(futures):
                 task_id = futures[future]
                 try:
-                    responses += future.result()
+                    responses[task_id] = future.result()
                 except Exception as e:
                     logger.info(f'Perform infer task: {task_id} get an error: {e}')
         return responses

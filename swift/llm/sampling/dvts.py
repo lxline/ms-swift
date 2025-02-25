@@ -32,7 +32,18 @@ class Beam:
     rollout_scores: List[float] = field(default_factory=list)
     outcome_score: float = 0.0
     terminated: bool = False
-    # children: List['Beam'] = None
+    children: List['Beam'] = field(default_factory=list)
+
+    def to_dict(self):
+        return {
+            'current_texts': self.current_texts,
+            'rollout_texts': self.rollout_texts,
+            'current_scores': self.current_scores,
+            'rollout_scores': self.rollout_scores,
+            'outcome_score': self.outcome_score,
+            'terminated': self.terminated,
+            'children': [child.to_dict() for child in self.children] if self.children else []
+        }
 
 
 def aggregate_scores(
@@ -53,7 +64,7 @@ class BeamSearchTree:
                  query,
                  ground_truth,
                  prefix_messages,
-                 beam,
+                 suffix_messages,
                  config,
                  generator,
                  orm_model,
@@ -61,10 +72,7 @@ class BeamSearchTree:
         self.query = query
         self.ground_truth = ground_truth
         self.prefix_messages = prefix_messages
-        self.suffix_messages = [{
-            'role': 'user',
-            'content': NXT_PROMPT,
-        }]
+        self.suffix_messages = suffix_messages
         self.config = config
 
         self.generator = generator
@@ -73,8 +81,8 @@ class BeamSearchTree:
 
         self.usage_info = UsageInfo(0, 0, 0)
         self.step_index = 0
-        self.answers = []
-        self.beams = [beam]
+        self.root = Beam()
+        self.beams = [self.root]
 
     def update_usage_info(self, response):
         for key, value in self.usage_info.__dict__.items():
@@ -82,77 +90,61 @@ class BeamSearchTree:
             setattr(self.usage_info, key, update_value)
 
     def build(self):
-        iter_index = 0
-        while (iter_index < self.config.max_iterations
-            and len(self.beams) > 0):
-            _beams = [beam for beam in self.beams if not beam.terminated]
-            next_beams = []
-            for beam in _beams:
-                gen_beams = self.expand(beam)
-                self.rollout(gen_beams)
-                if iter_index == 0:
-                    next_beams = gen_beams
-                else:
-                    next_beams.append(self.prune(gen_beams))
-            iter_index += 1
-            self.beams = next_beams
-        return self.answers
+        for iter_index in range(self.config.max_iterations):
+            if len(self.beams) == 0:
+                break
+            self.expand()
+            self.rollout()
+            self.prune()
+        answers = self.collect()
+        return answers
 
-    def expand(self, curr_beam: Beam):
+    def expand(self):
         _config = self.config
-        n = _config.beam_width
-        history_messages = [{
-            'role': 'assistant',
-            'content': _config.stop_words[0].join(curr_beam.current_texts),
-        }]
-        suffix_messages = self.suffix_messages
-        infer_requests = [InferRequest(self.prefix_messages + history_messages + suffix_messages) for _ in range(n)]
+        n = _config.dvts_beam_width
+        infer_requests = []
+        for _beam in self.beams:
+            infer_messages = self.prefix_messages[:]
+            if len(_beam.current_texts) > 0:
+                infer_messages += [{
+                    'role': 'assistant',
+                    'content': _config.stop_words[0].join(_beam.current_texts),
+                }] + self.suffix_messages
+            infer_requests += [InferRequest(infer_messages) for _ in range(n)]
 
         # e_time = time.time()
-        # To perform the Expand operation in parallel,
-        # there's no need to consider the order for now, since the Prompt is the same.
-        history_messages = [{
-            'role': 'assistant',
-            'content': step,
-        } for step in curr_beam.current_texts]
-        expand_iter_index = 0
         unique_output = set()
-        prm_infer_requests = []
         responses = perform_infer(self.generator, infer_requests, _config.expand_request_configs,
                                   **_config.infer_kwargs)
-        for response in responses:
+        for index, response in enumerate(responses):
             # self.update_usage_info(response)
+            if response == None:
+                continue
             output = \
-                response.choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
+                response[0].choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
             if output in unique_output:
                 continue
             unique_output.add(output)
-            infer_request = InferRequest(self.prefix_messages + history_messages
-                                         + [{'role': 'assistant', 'content': output}])
-            prm_infer_requests.append(infer_request)
-        """
-        while len(unique_output) < n:
-            responses = perform_infer(self.generator, infer_requests, _config.expand_request_configs,
-                                      **_config.infer_kwargs)
-            for response in responses:
-                # self.update_usage_info(response)
-                output = \
-                response.choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
-                if output in unique_output:
-                    continue
-                unique_output.add(output)
-                infer_request = InferRequest(self.prefix_messages + history_messages
-                                             + [{'role': 'assistant', 'content': output}])
-                prm_infer_requests.append(infer_request)
-            if expand_iter_index == 5:
-                warnings.warn(f'5 iterations did get enough responses for beam_width: {_config.beam_width}')
-                break
-            expand_iter_index += 1
-        # logger.info(f"expand.expand time: {time.time() - e_time}")
-        """
+            parent_beam = self.beams[index // n]
+            terminated = self.orm_model.check_terminate(output)[0]
+            new_beam = Beam(
+                current_texts=parent_beam.current_texts[:] + [output],
+                current_scores=parent_beam.current_scores[:],
+                terminated=terminated,
+            )
+            parent_beam.children.append(new_beam)
 
         # To fetch Process Reward in parallel
         # e_time = time.time()
+        prm_infer_requests = []
+        for _beam in self.beams:
+            for child in _beam.children:
+                history_messages = [{
+                    'role': 'assistant',
+                    'content': step,
+                } for step in child.current_texts]
+                infer_request = InferRequest(self.prefix_messages + history_messages)
+                prm_infer_requests.append(infer_request)
         prm_score, _prm_mask = get_reward(
             self.prm_model,
             prm_infer_requests,
@@ -161,26 +153,26 @@ class BeamSearchTree:
         )
         # logger.info(f"expand.prm time: {time.time() - e_time}")
 
-        new_beams = []
-        for output, score in zip(unique_output, prm_score):
-            new_beam = Beam(
-                current_texts=curr_beam.current_texts + [output],
-                current_scores=curr_beam.current_scores + [score],
-            )
-            new_beams.append(new_beam)
-        return new_beams
+        prm_score_index = 0
+        for _beam in self.beams:
+            all_terminated = True
+            for child in _beam.children:
+                child.current_scores.append(prm_score[prm_score_index])
+                all_terminated = child.terminated and all_terminated
+                prm_score_index += 1
+            if all_terminated:
+                _beam.terminated = True
 
-    def rollout(self, next_beams: List[Beam]):
+    def rollout(self):
         _config = self.config
         index2rollout_beams = {}
         active_index = []
-        for index, beam in enumerate(next_beams):
-            if self.orm_model.check_terminate(beam.current_texts[-1])[0]:
-                beam.terminated = True
-                self.answers.append(_config.stop_words[0].join(beam.current_texts))
-            else:
-                index2rollout_beams[index] = beam
-                active_index.append(index)
+        for _beam in self.beams:
+            for child in _beam.children:
+                if not child.terminated:
+                    index2rollout_beams[len(active_index)] = child
+                    active_index.append(len(active_index))
+
         for i in range(_config.rollout_depth):
             if len(active_index) == 0:
                 break
@@ -197,45 +189,54 @@ class BeamSearchTree:
             responses = perform_infer(self.generator, infer_requests, _config.rollout_request_configs,
                                       **_config.infer_kwargs)
 
-            prm_infer_requests = []
             for index, response in zip(active_index, responses):
-                output = response.choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
+                output = response[0].choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
                 beam = index2rollout_beams[index]
                 beam.rollout_texts.append(output)
-                history_messages = [{
-                    'role': 'assistant',
-                    'content': step,
-                } for step in beam.current_texts] + [{
-                    'role': 'assistant',
-                    'content': step,
-                } for step in beam.rollout_texts]
-                infer_request = InferRequest(self.prefix_messages + history_messages)
-                prm_infer_requests.append(infer_request)
-
-            prm_score, _prm_mask = get_reward(
-                self.prm_model,
-                prm_infer_requests,
-                threshold=_config.prm_threshold,
-                do_normalize=False,
-            )
 
             nxt_index = []
-            for index, score in zip(active_index, prm_score):
+            for index in active_index:
                 beam = index2rollout_beams[index]
-                beam.rollout_scores.append(score)
-                if score > 0 and not self.orm_model.check_terminate(beam.rollout_texts[-1])[0]:
+                if not self.orm_model.check_terminate(beam.rollout_texts[-1])[0]:
                     nxt_index.append(index)
             active_index = nxt_index
 
-    def prune(self, gen_beams):
-        score2beam = {}
-        for beam in gen_beams:
-            mean_score = np.mean([beam.current_scores[-1]] + beam.rollout_scores)
-            score2beam[mean_score] = beam
-        best_score = max(score2beam.keys())
-        best_beam = score2beam[best_score]
-        return best_beam
+        prm_infer_requests = []
+        for _beam in self.beams:
+            for child in _beam.children:
+                history_messages = [{
+                    'role': 'assistant',
+                    'content': step,
+                } for step in child.current_texts] + [{
+                    'role': 'assistant',
+                    'content': step,
+                } for step in child.rollout_texts]
+                infer_request = InferRequest(self.prefix_messages + history_messages)
+                prm_infer_requests.append(infer_request)
 
+        prm_score, _prm_mask = get_reward(
+            self.prm_model,
+            prm_infer_requests,
+            threshold=_config.prm_threshold,
+            do_normalize=False,
+        )
+
+        prm_score_index = 0
+        for _beam in self.beams:
+            for child in _beam.children:
+                child.rollout_scores.append(prm_score[prm_score_index])
+                prm_score_index += 1
+
+    def prune(self):
+        next_beams = []
+        for _beam in self.beams:
+            if not _beam.terminated and len(_beam.children) > 0:
+                next_beams.append(max(_beam.children, key=lambda x: np.mean([x.current_scores[-1]] + x.rollout_scores)))
+        self.beams = next_beams
+
+    def collect(self):
+        json_data = json.dumps(self.root.to_dict(), ensure_ascii=False)
+        return json_data
 
 class DvtsSampler(Sampler):
 
@@ -248,7 +249,7 @@ class DvtsSampler(Sampler):
         if _args.sampler_engine == 'multi_clients':
             from swift.llm import InferClient
             self.infer_engine = [
-                InferClient(**_args.engine_kwargs) for _ in range(_args.num_trees * _args.beam_width)
+                InferClient(**_args.engine_kwargs) for _ in range(_args.dvts_beam_size * _args.dvts_beam_width)
             ]
             self.infer_kwargs['model'] = _args.model
         elif _args.sampler_engine == 'client':
@@ -272,6 +273,10 @@ class DvtsSampler(Sampler):
 
     def _prepare_template(self) -> None:
         # Hack from super()
+        self.suffix_messages = [{
+            'role': 'user',
+            'content': NXT_PROMPT,
+        }]
         self._prepare_request_configs()
 
     def _prepare_request_configs(self):
@@ -281,7 +286,7 @@ class DvtsSampler(Sampler):
         request_config.seed = _args.seed
         self.expand_request_configs = []
         self.rollout_request_configs = []
-        for i in range(max(_args.num_trees, _args.num_trees * _args.beam_width)):
+        for i in range(_args.dvts_beam_size * _args.dvts_beam_width):
             expand_request_config = deepcopy(request_config)
             expand_request_config.n = 1
             expand_request_config.num_beams = expand_request_config.n
@@ -304,55 +309,16 @@ class DvtsSampler(Sampler):
             'content': query,
         }]
         prefix_messages = _args.system_message + query_message
-        infer_requests = [InferRequest(prefix_messages) for _ in range(_args.num_trees)]
-
-        # e_time = time.time()
-        expand_iter_index = 0
-        unique_output = set()
-        prm_infer_requests = []
-        while True:
-            responses = perform_infer(self.infer_engine, infer_requests, self.expand_request_configs,
-                                      **self.infer_kwargs)
-            for response in responses:
-                output = \
-                response.choices[0].message.content.rstrip("".join(_args.stop_words)).split(_args.stop_words[0])[0]
-                if output in unique_output:
-                    continue
-                unique_output.add(output)
-                infer_request = InferRequest(prefix_messages + [{'role': 'assistant', 'content': output}])
-                prm_infer_requests.append(infer_request)
-            if len(unique_output) > _args.num_trees:
-                break
-            if expand_iter_index == 5:
-                raise ValueError(f'5 iterations did get enough responses for {_args.num_trees} trees')
-            expand_iter_index += 1
-
-        prm_score, _prm_mask = get_reward(
-            self.prm_model,
-            prm_infer_requests,
-            threshold=_args.prm_threshold,
-            do_normalize=False,
-        )
-        # logger.info(f"expand.prm time: {time.time() - e_time}")
-
-        answers = []
-        for output, score in zip(unique_output, prm_score):
-            beam = Beam(
-                current_texts = [output],
-                current_scores = [score],
-            )
-            tree = BeamSearchTree(
-                query,
-                ground_truth,
-                prefix_messages,
-                beam,
-                _args,
-                self.infer_engine,
-                self.orm_model,
-                self.prm_model,
-            )
-            tree_answers = tree.build()
-            answers.append(tree_answers)
+        answers = BeamSearchTree(
+            query=query,
+            ground_truth=ground_truth,
+            prefix_messages=prefix_messages,
+            suffix_messages=self.suffix_messages,
+            config=_args,
+            generator=self.infer_engine,
+            orm_model=self.orm_model,
+            prm_model=self.prm_model,
+        ).build()
         return answers
 
     def do_sample(self, data):
