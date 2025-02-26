@@ -309,6 +309,7 @@ class DvtsSampler(Sampler):
             'content': query,
         }]
         prefix_messages = _args.system_message + query_message
+        s_time = time.time()
         answers = BeamSearchTree(
             query=query,
             ground_truth=ground_truth,
@@ -319,6 +320,8 @@ class DvtsSampler(Sampler):
             orm_model=self.orm_model,
             prm_model=self.prm_model,
         ).build()
+        logger.info(f"used time: {time.time() - s_time}")
+        logger.info(f'answers: {answers}')
         return answers
 
     def do_sample(self, data):

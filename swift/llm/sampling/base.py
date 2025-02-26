@@ -24,11 +24,12 @@ class Sampler:
         _, self.processor = args.get_model_processor(load_model=False)
 
     def _prepare_rm(self):
+        args = self.args
         if self.args.prm_model is None:
             self.prm_model = None
             logger.warning('prm_model is None.')
         elif self.args.prm_model in prms:
-            self.prm_model = prms[self.args.prm_model]()
+            self.prm_model = prms[self.args.prm_model](**args.prm_kwargs)
         else:
             from swift.llm import PtEngine
             self.prm_model = PtEngine(self.args.prm_model, max_batch_size=64)
@@ -37,7 +38,7 @@ class Sampler:
             self.orm_model = None
             logger.warning('orm_model is None.')
         elif self.args.orm_model in orms:
-            self.orm_model = orms[self.args.orm_model]()
+            self.orm_model = orms[self.args.orm_model](**args.orm_kwargs)
         else:
             from swift.llm import PtEngine
             self.orm_model = PtEngine(self.args.orm_model, max_batch_size=64)

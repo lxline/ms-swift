@@ -94,93 +94,41 @@ class QwenMaxPRM(PRM):
         return rewards
 
 
-# TODO: read from file
-LLM_as_judge_SYS = """I will provide a math problem along with a solution. They will be formatted as follows:
-
-[Math Problem]
-
-<math_problem>
-...(math problem)...
-</math_problem>
-
-[Solution]
-
-<paragraph_1>
-...(paragraph 1 of solution)...
-</paragraph_1>
-
-...
-
-<paragraph_n>
-...(paragraph n of solution)...
-</paragraph_n>
-
-Your task is to review each paragraph of the solution in sequence, analyzing, verifying, and critiquing the reasoning in detail. You need to provide the analyses and the conclusion in the following format:
-
-<analysis_1>
-...(analysis of paragraph 1)...
-</analysis_1>
-
-...
-
-<analysis_n>
-...(analysis of paragraph n)...
-</analysis_n>
-
-<conclusion>
-Correct/Incorrect
-</conclusion>
-
-* When you analyze each paragraph, you should use proper verification, recalculation, or reflection to indicate whether it is logically and mathematically valid. Please elaborate on the analysis process carefully.
-
-* If an error is detected in any paragraph, you should describe the nature and cause of the error in detail, and suggest how to correct the error or the correct approach. Once a paragraph is found to contain any error, stop further analysis of subsequent paragraphs (as they may depend on the identified error) and directly provide the conclusion of "Incorrect."
-
-For instance, given a solution of five paragraphs, if an error is found in the third paragraph, you should reply in the following format:
-
-<analysis_1>
-...(analysis of paragraph 1)...
-</analysis_1>
-
-<analysis_2>
-...(analysis of paragraph 2)...
-</analysis_2>
-
-<analysis_3>
-...(analysis of paragraph 3; since an error is found here, also provide detailed critique and correction guideline)...
-</analysis_3>
-
-<conclusion>
-Incorrect
-</conclusion>
-
-Note that the analyses of paragraphs 4 and 5 should be skipped as the paragraph3 has been found to contain an error.
-
-* Respond with your analyses and conclusion directly.
-"""
-
-LLM_as_judge_QUERY = """The following is the math problem and the solution for you task:
-
-[Math Problem]
-
-{tagged_problem}
-
-[Solution]
-
-{tagged_response}
-"""
-
-
-class ClientPRM(PRM):
-
-    def __init__(self, api_key=None, base_url=None, model=None):
+class LLMJudgePRM(PRM):
+    """
+    LLM as a judge.
+    The Lessons of Developing Process Reward Models in Mathematical Reasoning, https://arxiv.org/abs/2501.07301
+    """
+    def __init__(self,
+                 system,
+                 query,
+                 api_key=None,
+                 base_url=None,
+                 model=None):
         from swift.llm import InferClient
         import os
+
+        if system is not None and system.endswith('.txt'):
+            assert os.path.isfile(system), f'system: {system}'
+            with open(system, 'r') as f:
+                self.system = f.read()
+        else:
+            self.system = system
+
+        if query is not None and query.endswith('.txt'):
+            assert os.path.isfile(query), f'query: {query}'
+            with open(query, 'r') as f:
+                self.query = f.read()
+        else:
+            self.query = query
+
         if api_key is None:
             api_key = os.getenv('DASHSCOPE_API_KEY')
         if base_url is None:
             base_url = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
         if model is None:
             model = 'qwen-max'
+
         self.infer_engine = InferClient(base_url=base_url, api_key=api_key)
         self.infer_kwargs = {
             'model': model,
@@ -207,18 +155,18 @@ class ClientPRM(PRM):
             for i, step in enumerate(steps):
                 tagged_response += f'<paragraph_{i + 1}>\n{step}\n</paragraph_{i + 1}>\n\n'
 
-            query = deepcopy(LLM_as_judge_QUERY)
+            query = deepcopy(self.query)
 
             query = query.replace('{tagged_problem}', tagged_problem)
             query = query.replace('{tagged_response}', tagged_response)
             messages = [
                 {
                     'role': 'system',
-                    'content': LLM_as_judge_SYS
+                    'content': self.system,
                 },
                 {
                     'role': 'user',
-                    'content': query
+                    'content': query,
                 },
             ]
 
@@ -245,6 +193,75 @@ class ClientPRM(PRM):
                 except Exception as e:
                     logger.info(f'Got exception: {e}. Not a valid reward, set to 0.')
                     rewards.append(0.)
+        return rewards
+
+
+class vLLMPRM(PRM):
+
+    def __init__(self,
+                 api_key=None,
+                 base_url=None,
+                 model='Qwen2.5-Math-PRM-7B',):
+        self.model = model
+        self.base_url = base_url
+        self.api_key = api_key
+        self.headers = {
+            "User-Agent": "vLLMPRM Client",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+
+    def post_http_request(self, prm_requests: list):
+        from concurrent.futures import ThreadPoolExecutor
+        import requests
+
+        def send_request(prm_request):
+            response = requests.post(self.base_url, headers=self.headers, json=prm_request)
+            return response
+
+        with ThreadPoolExecutor() as executor:
+            responses = list(executor.map(send_request, prm_requests))
+
+        return responses
+
+    def __call__(self,
+                 infer_requests: List[Union[InferRequest, Dict]],
+                 **kwargs):
+        prm_infer_requests = []
+        system = 'Please reason step by step, and put your final answer within \\boxed{}.'
+        for request in infer_requests:
+            previous = request.messages[:]
+            if previous[0]['role'] == 'system':
+                previous = previous[1:]
+
+            assert previous[0]['role'] == 'user'
+            assert previous[-1]['role'] == 'assistant'
+
+            request = {
+                'model': self.model,
+                'messages' : [{
+                    'role': 'system',
+                    'content': system
+                }] + previous,
+                'mm_processor_kwargs': None
+            }
+            prm_infer_requests.append(request)
+
+        responses = self.post_http_request(prm_infer_requests)
+        rewards = []
+        for response in responses:
+            try:
+                content = response.content
+                float_list = json.loads(content)['data'][0]['data']
+
+                if (isinstance(float_list, list)
+                    and all(isinstance(x, list) for x in float_list)
+                    and all(isinstance(x, float) for sublist in float_list for x in sublist)):
+                    rewards.append([_list[-1] for _list in float_list])
+                else:
+                    raise ValueError(f'Failed to parse Response: {response}')
+            except Exception:
+                rewards.append([0.])
         return rewards
 
 
@@ -285,14 +302,14 @@ class QwenPRM(PRM):
         responses = self.engine.infer(prm_infer_requests, **kwargs)
         rewards = []
         for response in responses:
-            content = response.choices[0].message.content
             try:
+                content = response.choices[0].message.content
                 float_list = json.loads(content)
 
                 if isinstance(float_list, list) and all(isinstance(x, (int, float)) for x in float_list):
                     rewards.append(float_list[-1])
                 else:
-                    raise ValueError('wrong response')
+                    raise ValueError(f'Failed to parse Response: {response}')
             except Exception:
                 rewards.append(0.)
         return rewards
@@ -300,6 +317,7 @@ class QwenPRM(PRM):
 
 prms = {
     'qwen_max': QwenMaxPRM,
-    'client': ClientPRM,
+    'llm_judge': LLMJudgePRM,
+    'vllm': vLLMPRM,
     'qwen': QwenPRM,
 }

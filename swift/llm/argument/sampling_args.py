@@ -17,7 +17,9 @@ logger = get_logger()
 class SamplingArguments(BaseArguments):
     # rm models
     prm_model: Optional[str] = None
+    prm_kwargs: Optional[str] = None
     orm_model: Optional[str] = None
+    orm_kwargs: Optional[str] = None
 
     # sampler settings
     # sample/mcts/dvts/xxx
@@ -80,6 +82,18 @@ class SamplingArguments(BaseArguments):
             self.engine_kwargs = json.loads(self.engine_kwargs)
         else:
             self.engine_kwargs = {}
+
+        if self.prm_kwargs is not None:
+            logger.info(self.prm_kwargs)
+            self.prm_kwargs = json.loads(self.prm_kwargs)
+        else:
+            self.prm_kwargs = {}
+
+        if self.orm_kwargs is not None:
+            logger.info(self.orm_kwargs)
+            self.orm_kwargs = json.loads(self.orm_kwargs)
+        else:
+            self.orm_kwargs = {}
 
         super().__post_init__()
 
