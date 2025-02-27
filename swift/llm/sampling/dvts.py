@@ -95,7 +95,7 @@ class BeamSearchTree:
                 break
             self.expand()
             self.rollout()
-            self.prune()
+            self.prune(iter_index)
         answers = self.collect()
         return answers
 
@@ -227,16 +227,19 @@ class BeamSearchTree:
                 child.rollout_scores.append(prm_score[prm_score_index])
                 prm_score_index += 1
 
-    def prune(self):
+    def prune(self, iter_index):
         next_beams = []
         for _beam in self.beams:
             if not _beam.terminated and len(_beam.children) > 0:
-                next_beams.append(max(_beam.children, key=lambda x: np.mean([x.current_scores[-1]] + x.rollout_scores)))
+                if iter_index > 0:
+                    next_beams.append(max(_beam.children, key=lambda x: np.mean([x.current_scores[-1]] + x.rollout_scores)))
+                else:
+                    next_beams = _beam.children[:]
         self.beams = next_beams
 
     def collect(self):
-        json_data = json.dumps(self.root.to_dict(), ensure_ascii=False)
-        return json_data
+        return self.root.to_dict()
+
 
 class DvtsSampler(Sampler):
 
@@ -309,7 +312,6 @@ class DvtsSampler(Sampler):
             'content': query,
         }]
         prefix_messages = _args.system_message + query_message
-        s_time = time.time()
         answers = BeamSearchTree(
             query=query,
             ground_truth=ground_truth,
@@ -320,23 +322,40 @@ class DvtsSampler(Sampler):
             orm_model=self.orm_model,
             prm_model=self.prm_model,
         ).build()
-        logger.info(f"used time: {time.time() - s_time}")
-        logger.info(f'answers: {answers}')
         return answers
 
+    def process_item(self, messages):
+        try:
+            query = messages[0]['content']
+            ground_truth = messages[1]['content']
+            answers = self.create_trees(query, ground_truth)
+            result = {
+                "query": query,
+                "ground_truth": ground_truth,
+                "answers": answers,
+            }
+            return result
+        except Exception as e:
+            logger.error(f'Error: {e}')
+            logger.error(f'Traceback: {traceback.format_exc()}')
+            return None
+
     def do_sample(self, data):
-        if not isinstance(data, list):
-            data = [data]
+        batch_messages = data['messages']
+        if not isinstance(batch_messages, list):
+            batch_messages = [batch_messages]
+
         generated = []
-        for item in data:
-            logger.info(f'time: {time.ctime(time.time())}')
-            try:
-                messages = item['messages'][0]
-                query = messages[0]['content']
-                ground_truth = messages[1]['content']
-                answers = self.create_trees(query, ground_truth)
-                generated.append(answers)
-            except Exception as e:
-                logger.error(f'Error: {e}')
-                logger.error(f'Traceback: {traceback.format_exc()}')
-        return generated
+        s_time = time.time()
+        logger.info(f'Batch started time: {time.ctime(s_time)}')
+        with ThreadPoolExecutor() as executor:
+            future_to_item = {executor.submit(self.process_item, messages): messages for messages in batch_messages}
+            for future in as_completed(future_to_item):
+                result = future.result()
+                if result is not None:
+                    generated.append(result)
+
+        generated_json = json.dumps(generated, ensure_ascii=False) + '\n'
+        logger.info(f'Batch generated: {generated_json}')
+        logger.info(f"used time: {time.time() - s_time}")
+        return generated_json

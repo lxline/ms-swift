@@ -224,28 +224,43 @@ class vLLMPRM(PRM):
 
         return responses
 
+    def process_request(self, infer_request: Union[InferRequest, Dict]):
+        system = 'Please reason step by step, and put your final answer within \\boxed{}.'
+
+        previous = infer_request.messages[:]
+        if previous[0]['role'] == 'system':
+            previous = previous[1:]
+
+        assert previous[0]['role'] == 'user'
+        assert previous[-1]['role'] == 'assistant'
+
+        request = {
+            'model': self.model,
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': system
+                },
+                {
+                    'role': 'user',
+                    'content': previous[0]['content']
+                },
+                {
+                    'role': 'assistant',
+                    'content': '<extra_0>'.join([x['content'] for x in previous[1:]]) + '<extra_0>'
+                }
+            ],
+            'mm_processor_kwargs': None
+        }
+
+        return request
+
     def __call__(self,
                  infer_requests: List[Union[InferRequest, Dict]],
                  **kwargs):
         prm_infer_requests = []
-        system = 'Please reason step by step, and put your final answer within \\boxed{}.'
         for request in infer_requests:
-            previous = request.messages[:]
-            if previous[0]['role'] == 'system':
-                previous = previous[1:]
-
-            assert previous[0]['role'] == 'user'
-            assert previous[-1]['role'] == 'assistant'
-
-            request = {
-                'model': self.model,
-                'messages' : [{
-                    'role': 'system',
-                    'content': system
-                }] + previous,
-                'mm_processor_kwargs': None
-            }
-            prm_infer_requests.append(request)
+            prm_infer_requests.append(self.process_request(request))
 
         responses = self.post_http_request(prm_infer_requests)
         rewards = []

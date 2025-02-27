@@ -54,7 +54,8 @@ class SwiftSampling(SwiftPipeline):
             os.remove(tmp_file)
         dataset = self._get_dataset()
         dataset_len = len(dataset)
-        total_iters = int(dataset_len // self.args.num_sampling_per_gpu_batch_size)
+        total_iters = (int(dataset_len // self.args.num_sampling_per_gpu_batch_size)
+                       + (dataset_len % self.args.num_sampling_per_gpu_batch_size > 0))
         if self.args.num_sampling_per_gpu_batches is None or self.args.num_sampling_per_gpu_batches > total_iters:
             self.args.num_sampling_per_gpu_batches = total_iters
 
