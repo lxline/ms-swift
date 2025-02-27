@@ -136,7 +136,7 @@ class BeamSearchTree:
 
         # To fetch Process Reward in parallel
         # e_time = time.time()
-        prm_infer_requests = []
+        orm_infer_requests, prm_infer_requests = [], []
         for _beam in self.beams:
             for child in _beam.children:
                 history_messages = [{
@@ -145,21 +145,30 @@ class BeamSearchTree:
                 } for step in child.current_texts]
                 infer_request = InferRequest(self.prefix_messages + history_messages)
                 prm_infer_requests.append(infer_request)
+                orm_infer_requests.append(InferRequest([{'role': 'assistant', 'content': child.current_texts[-1]}]))
         prm_score, _prm_mask = get_reward(
             self.prm_model,
             prm_infer_requests,
             threshold=_config.prm_threshold,
             do_normalize=False,
         )
+        orm_score, _orm_mask = get_reward(
+            self.orm_model,
+            orm_infer_requests,
+            ground_truths=[self.ground_truth] * len(orm_infer_requests),
+            threshold=0.0)
         # logger.info(f"expand.prm time: {time.time() - e_time}")
 
-        prm_score_index = 0
+        score_index = 0
         for _beam in self.beams:
             all_terminated = True
             for child in _beam.children:
-                child.current_scores.append(prm_score[prm_score_index])
-                all_terminated = child.terminated and all_terminated
-                prm_score_index += 1
+                child.current_scores.append(prm_score[score_index])
+                if child.terminated:
+                    child.outcome_score = orm_score[score_index]
+                else:
+                    all_terminated = False
+                score_index += 1
             if all_terminated:
                 _beam.terminated = True
 

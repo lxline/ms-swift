@@ -60,5 +60,103 @@ class MathFormat(ORM):
         return [1.0 if match else 0.0 for match in matches]
 
 
+class CountdownORM(ORM):
+
+    def __call__(self, completions, target, nums, **kwargs) -> List[float]:
+        """
+        Evaluates completions based on Mathematical correctness of the answer
+
+        Args:
+            completions (list[str]): Generated outputs
+            target (list[str]): Expected answers
+            nums (list[str]): Available numbers
+
+        Returns:
+            list[float]: Reward scores
+        """
+        rewards = []
+        for completion, gt, numbers in zip(completions, target, nums):
+            try:
+                # Check if the format is correct
+                match = re.search(r'<answer>(.*?)<\/answer>', completion)
+                if match is None:
+                    rewards.append(0.0)
+                    continue
+                # Extract the "answer" part from the completion
+                equation = match.group(1).strip()
+                if '=' in equation:
+                    equation = equation.split('=')[0]
+                # Extract all numbers from the equation
+                used_numbers = [int(n) for n in re.findall(r'\d+', equation)]
+
+                # Check if all numbers are used exactly once
+                if sorted(used_numbers) != sorted(numbers):
+                    rewards.append(0.0)
+                    continue
+                # Define a regex pattern that only allows numbers, operators, parentheses, and whitespace
+                allowed_pattern = r'^[\d+\-*/().\s]+$'
+                if not re.match(allowed_pattern, equation):
+                    rewards.append(0.0)
+                    continue
+
+                # Evaluate the equation with restricted globals and locals
+                result = eval(equation, {"__builti'ns__": None}, {})
+                # Check if the equation is correct and matches the ground truth
+                if abs(float(result) - float(gt)) < 1e-5:
+                    rewards.append(1.0)
+                else:
+                    rewards.append(0.0)
+            except Exception:
+                # If evaluation fails, reward is 0
+                rewards.append(0.0)
+        return rewards
+
+
+class MultiModalAccuracyORM(ORM):
+
+    def __call__(self, completions, solution, **kwargs) -> List[float]:
+        """
+        Reward function that checks if the completion is correct.
+        Args:
+            completions (list[str]): Generated outputs
+            solution (list[str]): Ground Truths.
+
+        Returns:
+            list[float]: Reward scores
+        """
+        rewards = []
+        from math_verify import parse, verify
+        for content, sol in zip(completions, solution):
+            reward = 0.0
+            # Try symbolic verification first
+            try:
+                answer = parse(content)
+                if float(verify(answer, parse(sol))) > 0:
+                    reward = 1.0
+            except Exception:
+                pass  # Continue to next verification method if this fails
+
+            # If symbolic verification failed, try string matching
+            if reward == 0.0:
+                try:
+                    # Extract answer from solution if it has think/answer tags
+                    sol_match = re.search(r'<answer>(.*?)</answer>', sol)
+                    ground_truth = sol_match.group(1).strip() if sol_match else sol.strip()
+
+                    # Extract answer from content if it has think/answer tags
+                    content_match = re.search(r'<answer>(.*?)</answer>', content)
+                    student_answer = content_match.group(1).strip() if content_match else content.strip()
+
+                    # Compare the extracted answers
+                    if student_answer == ground_truth:
+                        reward = 1.0
+                except Exception:
+                    pass  # Keep reward as 0.0 if both methods fail
+            rewards.append(reward)
+        return rewards
+
+
 orms['external_math_acc'] = MathAccuracy
 orms['external_math_format'] = MathFormat
+orms['external_countdown'] = CountdownORM
+orms['external_r1v_acc'] = MultiModalAccuracyORM

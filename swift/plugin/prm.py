@@ -130,6 +130,7 @@ class LLMJudgePRM(PRM):
             model = 'qwen-max'
 
         self.infer_engine = InferClient(base_url=base_url, api_key=api_key)
+        self.infer_engine.strict = False
         self.infer_kwargs = {
             'model': model,
             'use_tqdm': False,
