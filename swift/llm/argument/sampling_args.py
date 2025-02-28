@@ -46,15 +46,15 @@ class SamplingArguments(BaseArguments):
     cache_files: List[str] = dataclasses.field(default_factory=list)
 
     # MCTS & DVTS
+    generate_strategy: Literal['chat', 'generate'] = 'chat'
+    continue_prompt: Optional[str] = None
     rollout_depth: int = 5
     max_iterations: int = 100
+    process_reward_rate: float = 0.0
 
     # MCTS
-    process_reward_rate: float = 0.0
     rollout_start_depth: int = 3
     exploration_rate: float = 0.5
-    api_key: str = 'EMPTY'
-    base_url: str = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 
     # DVTS
     dvts_beam_size: int = 4
@@ -77,33 +77,32 @@ class SamplingArguments(BaseArguments):
                 raise ValueError(f'Please use a string prefix without directory to '
                                  f'`--output_file` but now is: {self.output_file}')
         self.padding_side = 'left'
+
         if self.engine_kwargs is not None:
-            logger.info(self.engine_kwargs)
+            logger.info(f"engine_kwargs: {self.engine_kwargs}")
             self.engine_kwargs = json.loads(self.engine_kwargs)
         else:
             self.engine_kwargs = {}
 
         if self.prm_kwargs is not None:
-            logger.info(self.prm_kwargs)
+            logger.info(f"prm_kwargs: {self.prm_kwargs}")
             self.prm_kwargs = json.loads(self.prm_kwargs)
         else:
             self.prm_kwargs = {}
 
         if self.orm_kwargs is not None:
-            logger.info(self.orm_kwargs)
+            logger.info(f"orm_kwargs: {self.orm_kwargs}")
             self.orm_kwargs = json.loads(self.orm_kwargs)
         else:
             self.orm_kwargs = {}
 
         super().__post_init__()
 
-        if self.system is not None:
-            self.system_message = [{
-                'role': 'system',
-                'content': self.system,
-            }]
-        else:
-            self.system_message = []
+        if self.continue_prompt is not None and self.continue_prompt.endswith('.txt'):
+            assert os.path.isfile(self.continue_prompt), f'self.continue_prompt: {self.continue_prompt}'
+            with open(self.continue_prompt, 'r') as f:
+                self.continue_prompt = f.read()
 
+        # TODO: remove
         if self.sampler_type in ['mcts', 'dvts']:
             self.stop_words = ['\n\n'] + self.stop_words

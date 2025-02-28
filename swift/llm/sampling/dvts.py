@@ -99,6 +99,18 @@ class BeamSearchTree:
         answers = self.collect()
         return answers
 
+    def generate_k_steps(self, beams, k):
+        def process_infer_requests():
+            pass
+
+        def process_generate_context():
+            pass
+
+        if self.config.generate_strategy == "chat":
+            pass
+        elif self.config.generate_strategy == "generate":
+            pass
+
     def expand(self):
         _config = self.config
         n = _config.dvts_beam_width
@@ -152,11 +164,14 @@ class BeamSearchTree:
             threshold=_config.prm_threshold,
             do_normalize=False,
         )
-        orm_score, _orm_mask = get_reward(
-            self.orm_model,
-            orm_infer_requests,
-            ground_truths=[self.ground_truth] * len(orm_infer_requests),
-            threshold=0.0)
+        if self.config.process_reward_rate < 1:
+            orm_score, _orm_mask = get_reward(
+                self.orm_model,
+                orm_infer_requests,
+                ground_truths=[self.ground_truth] * len(orm_infer_requests),
+                threshold=0.0)
+        else:
+            orm_score = [0.0] * len(orm_infer_requests)
         # logger.info(f"expand.prm time: {time.time() - e_time}")
 
         score_index = 0
@@ -285,10 +300,25 @@ class DvtsSampler(Sampler):
 
     def _prepare_template(self) -> None:
         # Hack from super()
-        self.suffix_messages = [{
-            'role': 'user',
-            'content': NXT_PROMPT,
-        }]
+        _args = self.args
+        if _args.system is not None:
+            _args.system_message = [{
+                'role': 'system',
+                'content': _args.system,
+            }]
+        else:
+            _args.system_message = []
+
+        if _args.continue_prompt is not None:
+            _args.suffix_messages = [{
+                'role': 'user',
+                'content': _args.continue_prompt,
+            }]
+        else:
+            _args.suffix_messages = []
+
+        _args.sep_words = _args.stop_words[0]
+
         self._prepare_request_configs()
 
     def _prepare_request_configs(self):
@@ -325,7 +355,7 @@ class DvtsSampler(Sampler):
             query=query,
             ground_truth=ground_truth,
             prefix_messages=prefix_messages,
-            suffix_messages=self.suffix_messages,
+            suffix_messages=_args.suffix_messages,
             config=_args,
             generator=self.infer_engine,
             orm_model=self.orm_model,
