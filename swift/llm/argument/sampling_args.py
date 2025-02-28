@@ -24,7 +24,7 @@ class SamplingArguments(BaseArguments):
     # sampler settings
     # sample/mcts/dvts/xxx
     sampler_type: Literal['sample', 'mcts', 'distill', 'dvts'] = 'sample'
-    sampler_engine: Literal['pt', 'lmdeploy', 'vllm', 'no', 'client'] = 'pt'
+    sampler_engine: Literal['pt', 'lmdeploy', 'vllm', 'no', 'client', 'multi_clients'] = 'pt'
     output_dir: str = 'sample_output'
     output_file: Optional[str] = None
     override_exist_file: bool = False
