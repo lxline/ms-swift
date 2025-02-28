@@ -24,6 +24,7 @@ def get_reward(model: Any,
                request_config: RequestConfig = None,
                ground_truths: List[str] = None,
                threshold: Optional[float] = None,
+               strategy: Optional[str] = "min",
                do_normalize: bool = True,):
     """Get reward from an RM model.
 
@@ -53,7 +54,14 @@ def get_reward(model: Any,
     arr = []
     for reward in rewards:
         if isinstance(reward, (list, tuple)):
-            arr.append(min(reward))
+            if strategy == 'max':
+                arr.append(max(reward))
+            elif strategy == 'min':
+                arr.append(min(reward))
+            elif strategy == 'mean':
+                arr.append(np.mean(reward))
+            elif strategy == 'last':
+                arr.append(reward[-1])
         else:
             arr.append(float(reward))
 

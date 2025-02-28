@@ -162,6 +162,7 @@ class BeamSearchTree:
             self.prm_model,
             prm_infer_requests,
             threshold=_config.prm_threshold,
+            strategy="last",
             do_normalize=False,
         )
         if self.config.process_reward_rate < 1:
@@ -245,6 +246,7 @@ class BeamSearchTree:
             self.prm_model,
             prm_infer_requests,
             threshold=_config.prm_threshold,
+            strategy="last",
             do_normalize=False,
         )
 
