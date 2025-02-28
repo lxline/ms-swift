@@ -252,11 +252,17 @@ class BeamSearchTree:
                 prm_score_index += 1
 
     def prune(self, iter_index):
+        _config = self.config
+        def cal_score(beam):
+            prm_score = np.mean([beam.current_scores[-1]] + beam.rollout_scores)
+            orm_score = beam.outcome_score
+            score = _config.process_reward_rate * prm_score + (1 - _config.process_reward_rate) * orm_score
+            return score
         next_beams = []
         for _beam in self.beams:
             if not _beam.terminated and len(_beam.children) > 0:
                 if iter_index > 0:
-                    next_beams.append(max(_beam.children, key=lambda x: np.mean([x.current_scores[-1]] + x.rollout_scores)))
+                    next_beams.append(max(_beam.children, key=lambda x: cal_score(x)))
                 else:
                     next_beams = _beam.children[:]
         self.beams = next_beams
