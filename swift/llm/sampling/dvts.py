@@ -36,9 +36,9 @@ class Beam:
 
     def to_dict(self):
         return {
-            'current_texts': self.current_texts,
+            'current_text': self.current_texts[-1] if len(self.current_texts) else "",
             'rollout_texts': self.rollout_texts,
-            'current_scores': self.current_scores,
+            'current_score': self.current_scores[-1] if len(self.current_scores) else 0,
             'rollout_scores': self.rollout_scores,
             'outcome_score': self.outcome_score,
             'terminated': self.terminated,
