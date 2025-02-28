@@ -197,6 +197,9 @@ class BeamSearchTree:
                     index2rollout_beams[len(active_index)] = child
                     active_index.append(len(active_index))
 
+        if _config.rollout_depth == 0:
+            return
+
         for i in range(_config.rollout_depth):
             if len(active_index) == 0:
                 break
