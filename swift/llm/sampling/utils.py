@@ -132,6 +132,7 @@ def perform_infer(infer_engines, infer_requests, request_configs, **infer_kwargs
 
 async def async_perform_generate(generator, prompts, generate_configs):
     from swift.llm.infer.protocol import random_uuid
+    import asyncio
     async def consume_async_generator(async_gen):
         result = None
         async for result in async_gen:
@@ -139,8 +140,7 @@ async def async_perform_generate(generator, prompts, generate_configs):
         assert result is not None
         return result
 
-
-    llm_inputs, request_ids = [], []
+    request_ids = []
     request_id2index = {}
     for index in range(len(prompts)):
         request_ids.append(random_uuid())
@@ -148,8 +148,8 @@ async def async_perform_generate(generator, prompts, generate_configs):
 
     tasks = [
         asyncio.create_task(
-            consume_async_generator(generator.generate(prompts[i], generate_configs[i], request_ids[i])))
-        for i in range(len(llm_inputs))
+            consume_async_generator(generator.engine.generate(prompts[i], generate_configs[i], request_ids[i])))
+        for i in range(len(prompts))
     ]
 
     done, pending = await asyncio.wait(tasks)

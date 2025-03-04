@@ -119,7 +119,7 @@ class BeamSearchTree:
             iter_beam = beams[index]
             results.append([])
             if not iter_beam.terminated:
-                active_index.append(len(active_index))
+                active_index.append(index)
 
         def process_infer_request():
             infer_requests = []
@@ -187,6 +187,8 @@ class BeamSearchTree:
         results = self.generate_k_steps(expand_beams, expand_request_configs, 1)
         unique_output = set()
         for index, result in enumerate(results):
+            if len(result) == 0:
+                continue
             output = result[0]
             if output in unique_output:
                 continue
@@ -295,7 +297,9 @@ class BeamSearchTree:
         for _beam in self.beams:
             if not _beam.terminated and len(_beam.children) > 0:
                 if iter_index > 0:
-                    next_beams.append(max(_beam.children, key=lambda x: cal_score(x)))
+                    best_beam = max(_beam.children, key=lambda x: cal_score(x))
+                    if not best_beam.terminated:
+                        next_beams.append(best_beam)
                 else:
                     next_beams = _beam.children[:]
         self.beams = next_beams
