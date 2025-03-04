@@ -1,4 +1,5 @@
 import time
+import asyncio
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -16,13 +17,20 @@ from swift.llm.argument.sampling_args import SamplingArguments
 from swift.llm.infer.protocol import UsageInfo
 from swift.utils import get_logger
 from .base import Sampler
-from .utils import get_reward, perform_infer
+from .utils import get_reward, perform_infer, async_perform_generate
 
 
 logger = get_logger()
 
 
 NXT_PROMPT = "Continue."
+
+Qwen_template = """<|im_start|>system
+{{ .System }}<|im_end|>
+<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+"""
 
 @dataclass
 class Beam:
@@ -99,41 +107,87 @@ class BeamSearchTree:
         answers = self.collect()
         return answers
 
-    def generate_k_steps(self, beams, k):
-        def process_infer_requests():
-            pass
+    def generate_k_steps(self,
+                         beams,
+                         request_configs,
+                         k,):
+        _config = self.config
 
-        def process_generate_context():
-            pass
+        results = []
+        active_index = []
+        for index in range(len(beams)):
+            iter_beam = beams[index]
+            results.append([])
+            if not iter_beam.terminated:
+                active_index.append(len(active_index))
 
-        if self.config.generate_strategy == "chat":
-            pass
-        elif self.config.generate_strategy == "generate":
-            pass
+        def process_infer_request():
+            infer_requests = []
+            for index in active_index:
+                history_messages = [{
+                    'role': 'assistant',
+                    'content': _config.stop_words[0].join(beams[index].current_texts + results[index]),
+                }]
+                infer_request = InferRequest(self.prefix_messages + history_messages + self.suffix_messages)
+                infer_requests.append(infer_request)
+            return infer_requests
+
+        def process_generate_prompt():
+            prompts = []
+            for index in active_index:
+                prompt = deepcopy(Qwen_template)
+                prompt = prompt.replace("{{ .System }}", _config.system)
+                prompt = prompt.replace("{{ .Prompt }}", self.query)
+                prompt += _config.stop_words[0].join(beams[index].current_texts + results[index])
+                prompts.append(prompt)
+            return prompts
+
+        if _config.generate_strategy == "generate":
+            generation_configs = [self.generator._prepare_generation_config(request_config) for request_config in
+                                  request_configs]
+
+        for step_index in range(k):
+            if len(active_index) == 0:
+                break
+            if _config.generate_strategy == "chat":
+                infer_requests = process_infer_request()
+                responses = perform_infer(self.generator, infer_requests, _config.rollout_request_configs,
+                                          **_config.infer_kwargs)
+
+                nxt_index = []
+                for index, response in zip(active_index, responses):
+                    output = response[0].choices[0].message.content.rstrip("".join(_config.stop_words)).split(
+                        _config.stop_words[0])[0]
+                    results[index].append(output)
+                    if not self.orm_model.check_terminate(output)[0]:
+                        nxt_index.append(index)
+                active_index = nxt_index
+            elif _config.generate_strategy == "generate":
+                prompts = process_generate_prompt()
+                step_answers = asyncio.run(async_perform_generate(self.generator, prompts, generation_configs))
+                nxt_index = []
+                for index, step_answer in zip(active_index, step_answers):
+                    results[index].append(step_answer)
+                    if not self.orm_model.check_terminate(step_answer)[0]:
+                        nxt_index.append(index)
+                active_index = nxt_index
+
+        return results
 
     def expand(self):
         _config = self.config
         n = _config.dvts_beam_width
-        infer_requests = []
+        expand_beams = []
+        expand_request_configs = []
         for _beam in self.beams:
-            infer_messages = self.prefix_messages[:]
-            if len(_beam.current_texts) > 0:
-                infer_messages += [{
-                    'role': 'assistant',
-                    'content': _config.stop_words[0].join(_beam.current_texts),
-                }] + self.suffix_messages
-            infer_requests += [InferRequest(infer_messages) for _ in range(n)]
+            for _ in range(n):
+                expand_beams.append(_beam)
+                expand_request_configs.append(_config.expand_request_configs[len(expand_request_configs)])
 
-        # e_time = time.time()
+        results = self.generate_k_steps(expand_beams, expand_request_configs, 1)
         unique_output = set()
-        responses = perform_infer(self.generator, infer_requests, _config.expand_request_configs,
-                                  **_config.infer_kwargs)
-        for index, response in enumerate(responses):
-            # self.update_usage_info(response)
-            if response == None:
-                continue
-            output = \
-                response[0].choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
+        for index, result in enumerate(results):
+            output = result[0]
             if output in unique_output:
                 continue
             unique_output.add(output)
@@ -190,48 +244,22 @@ class BeamSearchTree:
 
     def rollout(self):
         _config = self.config
-        index2rollout_beams = {}
-        active_index = []
+        rollout_beams = []
+        rollout_request_configs = []
         for _beam in self.beams:
             for child in _beam.children:
-                if not child.terminated:
-                    index2rollout_beams[len(active_index)] = child
-                    active_index.append(len(active_index))
+                rollout_beams.append(child)
+                rollout_request_configs.append(_config.rollout_request_configs[0])
 
         if _config.rollout_depth == 0:
             return
 
-        for i in range(_config.rollout_depth):
-            if len(active_index) == 0:
-                break
-            infer_requests = []
-            for index in active_index:
-                beam = index2rollout_beams[index]
-                history_messages = [{
-                    'role': 'assistant',
-                    'content': _config.stop_words[0].join(beam.current_texts + beam.rollout_texts),
-                }]
-                infer_request = InferRequest(self.prefix_messages + history_messages + self.suffix_messages)
-                infer_requests.append(infer_request)
-
-            responses = perform_infer(self.generator, infer_requests, _config.rollout_request_configs,
-                                      **_config.infer_kwargs)
-
-            for index, response in zip(active_index, responses):
-                output = response[0].choices[0].message.content.rstrip("".join(_config.stop_words)).split(_config.stop_words[0])[0]
-                beam = index2rollout_beams[index]
-                beam.rollout_texts.append(output)
-
-            nxt_index = []
-            for index in active_index:
-                beam = index2rollout_beams[index]
-                if not self.orm_model.check_terminate(beam.rollout_texts[-1])[0]:
-                    nxt_index.append(index)
-            active_index = nxt_index
+        results = self.generate_k_steps(rollout_beams, rollout_request_configs, _config.rollout_depth)
 
         prm_infer_requests = []
         for _beam in self.beams:
             for child in _beam.children:
+                child.rollout_texts = results.pop(0)
                 history_messages = [{
                     'role': 'assistant',
                     'content': step,

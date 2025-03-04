@@ -130,6 +130,41 @@ def perform_infer(infer_engines, infer_requests, request_configs, **infer_kwargs
         **infer_kwargs,
     )
 
+async def async_perform_generate(generator, prompts, generate_configs):
+    from swift.llm.infer.protocol import random_uuid
+    async def consume_async_generator(async_gen):
+        result = None
+        async for result in async_gen:
+            pass
+        assert result is not None
+        return result
+
+
+    llm_inputs, request_ids = [], []
+    request_id2index = {}
+    for index in range(len(prompts)):
+        request_ids.append(random_uuid())
+        request_id2index[request_ids[-1]] = index
+
+    tasks = [
+        asyncio.create_task(
+            consume_async_generator(generator.generate(prompts[i], generate_configs[i], request_ids[i])))
+        for i in range(len(llm_inputs))
+    ]
+
+    done, pending = await asyncio.wait(tasks)
+
+    answers = [""] * len(prompts)
+    for task in done:
+        try:
+            result = task.result()
+            for output in result.outputs:
+                answers[request_id2index[result.request_id]] = output.text
+        except Exception as e:
+            print(f"Task failed with exception: {e}")
+
+    return answers
+
 
 def collect_from_mct(monte_carlo_tree, collect_filter_threshold):
     from transformers.utils import strtobool
