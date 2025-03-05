@@ -146,6 +146,7 @@ async def async_perform_generate(generator, prompts, generate_configs):
         request_ids.append(random_uuid())
         request_id2index[request_ids[-1]] = index
 
+    generator.engine.engine.model_executor.parallel_worker_tasks = None # Otherwise, Engine is gracefully shutting down and stuck.
     tasks = [
         asyncio.create_task(
             consume_async_generator(generator.engine.generate(prompts[i], generate_configs[i], request_ids[i])))
