@@ -383,34 +383,30 @@ class DvtsSampler(Sampler):
             rollout_request_config.n = 1
             self.rollout_request_configs.append(rollout_request_config)
 
-    def create_trees(self, query: str, ground_truth: str):
+    def create_trees(self, messages):
         _args = self.args
         _args.expand_request_configs = self.expand_request_configs
         _args.rollout_request_configs = self.rollout_request_configs
         _args.infer_kwargs = self.infer_kwargs
 
-        query_message = [{
-            'role': 'user',
-            'content': query,
-        }]
-        prefix_messages = _args.system_message + query_message
-        answers = BeamSearchTree(
-            query=query,
-            ground_truth=ground_truth,
-            prefix_messages=prefix_messages,
-            suffix_messages=_args.suffix_messages,
-            config=_args,
-            generator=self.infer_engine,
-            orm_model=self.orm_model,
-            prm_model=self.prm_model,
-        ).build()
-        return answers
-
-    def process_item(self, messages):
         try:
             query = messages[0]['content']
             ground_truth = messages[1]['content']
-            answers = self.create_trees(query, ground_truth)
+            query_message = [{
+                'role': 'user',
+                'content': query,
+            }]
+            prefix_messages = _args.system_message + query_message
+            answers = BeamSearchTree(
+                query=query,
+                ground_truth=ground_truth,
+                prefix_messages=prefix_messages,
+                suffix_messages=_args.suffix_messages,
+                config=_args,
+                generator=self.infer_engine,
+                orm_model=self.orm_model,
+                prm_model=self.prm_model,
+            ).build()
             result = {
                 "query": query,
                 "ground_truth": ground_truth,
@@ -431,7 +427,7 @@ class DvtsSampler(Sampler):
         s_time = time.time()
         logger.info(f'Batch started time: {time.ctime(s_time)}')
         with ThreadPoolExecutor() as executor:
-            future_to_item = {executor.submit(self.process_item, messages): messages for messages in batch_messages}
+            future_to_item = {executor.submit(self.create_trees, messages): messages for messages in batch_messages}
             for future in as_completed(future_to_item):
                 result = future.result()
                 if result is not None:
