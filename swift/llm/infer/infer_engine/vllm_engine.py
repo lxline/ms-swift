@@ -476,3 +476,21 @@ class VllmEngine(InferEngine):
                 pass
 
         async_llm_engine._log_task_completion = new_log_task_completion
+
+    async def generate_async(self,
+                             prompt,
+                             generate_config,
+                             request_id):
+        result_generator = self.engine.generate(prompt, generate_config, request_id)
+
+        result = None
+        async for result in result_generator:
+            pass
+        assert result is not None
+
+        return result.outputs[0].text
+
+    def generate(self, prompts, generate_configs):
+        from swift.llm.infer.protocol import random_uuid
+        tasks = [self.generate_async(prompts[i], generate_configs[i], random_uuid()) for i in range(len(prompts))]
+        return self._batch_infer_stream(tasks, False, False)

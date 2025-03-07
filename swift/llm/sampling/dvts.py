@@ -164,7 +164,8 @@ class BeamSearchTree:
                 active_index = nxt_index
             elif _config.generate_strategy == "generate":
                 prompts = process_generate_prompt()
-                step_answers = asyncio.run(async_perform_generate(self.generator, prompts, generation_configs))
+                step_answers = self.generator.generate(prompts, generation_configs)
+                #step_answers = asyncio.run(async_perform_generate(self.generator, prompts, generation_configs))
                 nxt_index = []
                 for index, step_answer in zip(active_index, step_answers):
                     results[index].append(step_answer)
