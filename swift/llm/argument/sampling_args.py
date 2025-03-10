@@ -46,8 +46,6 @@ class SamplingArguments(BaseArguments):
     cache_files: List[str] = dataclasses.field(default_factory=list)
 
     # MCTS & DVTS
-    generate_strategy: Literal['chat', 'generate'] = 'chat'
-    continue_prompt: Optional[str] = None
     rollout_depth: int = 5
     max_iterations: int = 100
     process_reward_rate: float = 0.0
@@ -97,11 +95,6 @@ class SamplingArguments(BaseArguments):
             self.orm_kwargs = {}
 
         super().__post_init__()
-
-        if self.continue_prompt is not None and self.continue_prompt.endswith('.txt'):
-            assert os.path.isfile(self.continue_prompt), f'self.continue_prompt: {self.continue_prompt}'
-            with open(self.continue_prompt, 'r') as f:
-                self.continue_prompt = f.read()
 
         # TODO: remove
         if self.sampler_type in ['mcts', 'dvts']:
