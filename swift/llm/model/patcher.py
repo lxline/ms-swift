@@ -12,11 +12,11 @@ import transformers
 from accelerate.utils import find_device
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import PreTrainedModel, trainer
+from transformers import PreTrainedModel, dynamic_module_utils, trainer
 from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
 from swift.llm import to_device, to_float_dtype
-from swift.utils import get_dist_setting, get_logger, is_mp_ddp, use_torchacc
+from swift.utils import get_dist_setting, get_logger, is_mp_ddp, safe_ddp_context, use_torchacc
 from swift.utils.torch_utils import _get_max_memory, _sync_max_memory, get_device_count
 from .model_arch import get_model_arch
 from .utils import HfConfigFactory
@@ -59,13 +59,49 @@ def patch_output_clone(module: torch.nn.Module):
     module.register_forward_hook(_clone_hook)
 
 
-def patch_output_normalizer(module: torch.nn.Module):
+def patch_output_normalizer(module: torch.nn.Module, model_meta):
 
-    def _normalizer_hook(module, input, output):
-        output.last_hidden_state = F.normalize(output.last_hidden_state[:, 0], p=2, dim=1)
-        return output
+    def lm_head_forward(self, hidden_states):
+        return hidden_states
 
-    module.register_forward_hook(_normalizer_hook)
+    lm_heads = ['lm_head', 'output', 'embed_out', 'output_layer']
+    llm_prefix = getattr(get_model_arch(model_meta.model_arch), 'language_model', None)
+    if llm_prefix:
+        llm_model = getattr(module, llm_prefix[0])
+    else:
+        llm_model = module
+
+    if 'CausalLM' not in llm_model.__class__.__name__:
+        llm_model = module
+
+    found = False
+    for lm_head in lm_heads:
+        if hasattr(llm_model, lm_head):
+            getattr(llm_model, lm_head).forward = MethodType(lm_head_forward, getattr(llm_model, lm_head))
+            found = True
+            break
+
+    assert found, 'Cannot find the proper lm_head name'
+
+    def forward(self, input_ids: torch.LongTensor = None, attention_mask=None, *args, **kwargs):
+
+        outputs = self.forward_origin(input_ids=input_ids, attention_mask=attention_mask, *args, **kwargs)
+        hidden_states = outputs.logits
+        left_padding = (attention_mask[:, -1].sum() == attention_mask.shape[0])
+        if left_padding:
+            embeddings = hidden_states[:, -1]
+        else:
+            sequence_lengths = attention_mask.sum(dim=1) - 1
+            batch_size = hidden_states.shape[0]
+            embeddings = hidden_states[torch.arange(batch_size, device=hidden_states.device), sequence_lengths]
+        embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+        return {
+            'last_hidden_state': embeddings.contiguous(),
+        }
+
+    llm_model.forward_origin = llm_model.forward
+    llm_model.forward = MethodType(forward, llm_model)
 
 
 def patch_output_to_input_device(module: torch.nn.Module):
@@ -124,7 +160,7 @@ def _patch_sequence_classification(model, model_meta):
         llm_model = getattr(model, llm_prefix[0])
     else:
         llm_model = model
-    if 'CausalLM' not in llm_model.__class__.__name__:
+    if 'CausalLM' not in llm_model.__class__.__name__:  # fix qwen2_vl
         llm_model = model
     llm_model.num_labels = model.config.num_labels
     llm_model.score = nn.Linear(hidden_size, llm_model.num_labels, bias=False, dtype=llm_model.dtype)
@@ -237,12 +273,15 @@ def patch_automodel_for_sequence_classification(model_meta):
 
 
 @contextmanager
-def patch_automodel_for_awq():
+def patch_automodel(automodel_class, model_info):
     from_pretrained = PreTrainedModel.from_pretrained.__func__
 
     @classmethod
     def _new_from_pretrained(cls, *args, **kwargs):
-        kwargs.pop('use_cache', None)
+        if 'AutoAWQFor' in automodel_class.__name__:
+            kwargs.pop('use_cache', None)
+        if model_info.quant_method == 'gptq':
+            cls.main_input_name = 'input_ids'
         return from_pretrained(cls, *args, **kwargs)
 
     PreTrainedModel.from_pretrained = _new_from_pretrained
@@ -293,3 +332,18 @@ def patch_mp_ddp():
         trainer.Accelerator.__init__ = (lambda self, device_placement=False, *args, **kwargs: _old_accelerator_init(
             self, device_placement=device_placement, *args, **kwargs))
         trainer.Accelerator.verify_device_map = lambda *args, **kwargs: False
+
+
+@contextmanager
+def patch_get_dynamic_module():
+    origin_get_cached_module_file = dynamic_module_utils.get_cached_module_file
+
+    def new_get_cached_module_file(pretrained_model_name_or_path, *args, **kwargs):
+        with safe_ddp_context(hash_id=str(pretrained_model_name_or_path)):
+            return origin_get_cached_module_file(pretrained_model_name_or_path, *args, **kwargs)
+
+    dynamic_module_utils.get_cached_module_file = new_get_cached_module_file
+    try:
+        yield
+    finally:
+        dynamic_module_utils.get_cached_module_file = origin_get_cached_module_file

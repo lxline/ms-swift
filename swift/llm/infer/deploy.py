@@ -57,8 +57,7 @@ class SwiftDeploy(SwiftInfer):
     def lifespan(self, app: FastAPI):
         args = self.args
         if args.log_interval > 0:
-            thread = Thread(target=lambda: asyncio.run(self._log_stats_hook()))
-            thread.daemon = True
+            thread = Thread(target=lambda: asyncio.run(self._log_stats_hook()), daemon=True)
             thread.start()
         try:
             yield
@@ -119,12 +118,12 @@ class SwiftDeploy(SwiftInfer):
                     response.choices[i].message.content[j]['image'] = f'data:image/jpg;base64,{b64_image}'
 
         is_finished = all(response.choices[i].finish_reason for i in range(len(response.choices)))
-        if return_cmpl_response:
-            response = response.to_cmpl_response()
         if 'stream' in response.__class__.__name__.lower():
             request_info['response'] += response.choices[0].delta.content
         else:
             request_info['response'] = response.choices[0].message.content
+        if return_cmpl_response:
+            response = response.to_cmpl_response()
         if is_finished:
             if args.log_interval > 0:
                 self.infer_stats.update(response)
