@@ -16,7 +16,7 @@ from swift.llm.argument.sampling_args import SamplingArguments
 from swift.llm.infer.protocol import UsageInfo
 from swift.utils import get_logger
 from .base import Sampler
-from .utils import get_reward, perform_infer, async_perform_generate
+from .utils import get_reward
 
 
 logger = get_logger()
