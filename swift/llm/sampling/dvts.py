@@ -1,19 +1,13 @@
 import time
-import asyncio
-import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from copy import deepcopy
 
 import json
-import warnings
 import numpy as np
 
-import math
-from typing import Literal, List, Dict
+from typing import List, Dict
 from swift.llm import InferRequest
 from swift.llm.argument.sampling_args import SamplingArguments
-from swift.llm.infer.protocol import UsageInfo
 from swift.utils import get_logger
 from .base import Sampler
 from .utils import get_reward
@@ -21,8 +15,6 @@ from .utils import get_reward
 
 logger = get_logger()
 
-
-NXT_PROMPT = "Continue."
 
 Qwen_template = """<|im_start|>system
 {{ .System }}<|im_end|>
