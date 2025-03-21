@@ -246,7 +246,14 @@ class Template(ProcessorMixin):
     def _rlhf_encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
         chosen_inputs, rejected_inputs = inputs, deepcopy(inputs)
         assert chosen_inputs.rejected_response is not None, f'inputs: {inputs}'
-        rejected_inputs.messages[-1]['content'] = chosen_inputs.rejected_response
+        steps = rejected_inputs.messages[-1]['content'].split("\n\n")
+        if steps[-1] == "":
+            steps.pop(-1)
+            steps = [step + "\n\n" for step in steps]
+        else:
+            steps = [step + "\n\n" for step in steps[:-1]] + [steps[-1]]
+        steps[-1] = chosen_inputs.rejected_response
+        rejected_inputs.messages[-1]['content'] = "".join(steps)
         chosen_encoded = self._encode(chosen_inputs)
         rejected_encoded = self._encode(rejected_inputs)
 
@@ -725,12 +732,19 @@ class Template(ProcessorMixin):
             if isinstance(context, str):
                 # tokenizer_kwargs is the returned tokenizer_kwargs,
                 # while curr_tokenizer_kwargs is the tokenizer_kwargs for the current context.
+                if "\\boxed" not in context:
+                    context = context[:-10]  # <|im_end|>
                 token_list = self._tokenize(context)
             else:
                 token_list = context
             input_ids += token_list
             if loss_scale_list[i] > 0.0:
-                labels += token_list
+                r_index = len(token_list) - 2
+                while r_index >= 0:
+                    if "\n\n" in self.safe_decode([token_list[r_index]]):
+                        break
+                    r_index -= 1
+                labels += [-100] * (r_index + 1) + token_list[r_index + 1:]
             else:
                 labels += [-100] * len(token_list)
             loss_scale.extend([loss_weight] * len(token_list))
